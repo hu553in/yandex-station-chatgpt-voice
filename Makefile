@@ -12,6 +12,11 @@ JOBS ?= 2
 -include config.mk
 export GO UV PYTHON JOBS MAKE
 
+start restart: export VOICE := $(VOICE)
+start restart: export BACKEND_MODEL := $(BACKEND_MODEL)
+start restart: export BACKEND_THINKING_EFFORT := $(BACKEND_THINKING_EFFORT)
+auth: export SESSION_JSON := $(SESSION_JSON)
+
 .PHONY: help setup fmt test vet check build clean connect status install start stop restart logs shell auth
 
 help:
@@ -60,6 +65,7 @@ check:
 	@files="$$("$$($(GO) env GOROOT)/bin/gofmt" -l cmd internal)"; test -z "$$files" || { printf 'Run make fmt for:\n%s\n' "$$files" >&2; exit 1; }
 	sh -n tools/build-arm.sh
 	$(PYTHON) -c 'import ast; from pathlib import Path; [ast.parse(p.read_text(), filename=str(p)) for p in Path("tools").glob("*.py")]'
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tools -p 'test_*.py'
 	$(MAKE) test vet
 
 build:
@@ -69,7 +75,7 @@ clean:
 	rm -rf build
 
 connect status start stop restart logs shell auth:
-	$(PYTHON) tools/station.py --adb "$(ADB)" --ip "$(STATION_IP)" $(if $(filter auth,$@),$(if $(SESSION_JSON),--session-json "$(SESSION_JSON)")) $@
+	$(PYTHON) tools/station.py --adb "$(ADB)" --ip "$(STATION_IP)" $@
 
 install: build
 	$(PYTHON) tools/station.py --adb "$(ADB)" --ip "$(STATION_IP)" install

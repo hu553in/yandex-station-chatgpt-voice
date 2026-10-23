@@ -20,30 +20,38 @@ struct station_spotter {
   void (*conf_free)(void *, void **);
 };
 
+static void append_error(char *out, size_t size, const char *message) {
+  size_t used = strnlen(out, size);
+  if (used < size)
+    snprintf(out + used, size - used, "%s%s", used ? "; " : "", message);
+}
+
 static int vendor_error(station_spotter *s, void **error, char *out,
-                        size_t size) {
+                        size_t size, const char *operation) {
   if (!*error)
     return 0;
-  const char *message = s->error_message(*error);
-  snprintf(out, size, "native spotter: %s", message ? message : "vendor error");
+  append_error(out, size, operation);
   s->error_free(error);
   *error = NULL;
   return -1;
 }
 
 int station_spotter_close(station_spotter *s, char *error, size_t size) {
+  if (size)
+    error[0] = 0;
   if (!s)
     return 0;
   int failed = 0;
   void *err = NULL;
   if (s->detector) {
     s->destroy(s->detector, &err);
-    if (vendor_error(s, &err, error, size))
+    if (vendor_error(s, &err, error, size, "native spotter destroy failed"))
       failed = -1;
   }
   if (s->conf) {
     s->conf_free(s->conf, &err);
-    if (vendor_error(s, &err, error, size))
+    if (vendor_error(s, &err, error, size,
+                     "native spotter configuration cleanup failed"))
       failed = -1;
   }
   if (s->library)
@@ -67,6 +75,8 @@ int station_spotter_close(station_spotter *s, char *error, size_t size) {
 
 station_spotter *station_spotter_open(const char *model, char *error,
                                       size_t size) {
+  if (size)
+    error[0] = 0;
   station_spotter *s = calloc(1, sizeof(*s));
   if (!s) {
     snprintf(error, size, "cannot allocate native spotter");
@@ -97,21 +107,22 @@ station_spotter *station_spotter_open(const char *model, char *error,
   LOAD(conf_free, "spotter_conf_free");
   void *err = NULL;
   s->conf = s->conf_read(model, &err);
-  if (vendor_error(s, &err, error, size))
+  if (vendor_error(s, &err, error, size,
+                   "native spotter configuration read failed"))
     goto fail;
   if (!s->conf) {
     snprintf(error, size, "vendor returned no configuration");
     goto fail;
   }
   uint32_t rate = s->sample_rate(s->conf, &err);
-  if (vendor_error(s, &err, error, size))
+  if (vendor_error(s, &err, error, size, "native spotter sample rate failed"))
     goto fail;
   if (rate != 16000) {
     snprintf(error, size, "unexpected native spotter sample rate");
     goto fail;
   }
   s->detector = s->create(s->conf, rate, 0, &err);
-  if (vendor_error(s, &err, error, size))
+  if (vendor_error(s, &err, error, size, "native spotter create failed"))
     goto fail;
   if (!s->detector) {
     snprintf(error, size, "vendor returned no detector");
@@ -119,38 +130,42 @@ station_spotter *station_spotter_open(const char *model, char *error,
   }
   return s;
 library_error:
-  snprintf(error, size, "cannot load Station vendor library: %s", dlerror());
+  snprintf(error, size, "cannot load Station vendor library");
 fail:
   {
-    char ignored[256];
-    station_spotter_close(s, ignored, sizeof(ignored));
+    char cleanup[256] = {0};
+    if (station_spotter_close(s, cleanup, sizeof(cleanup)))
+      append_error(error, size, cleanup);
     return NULL;
   }
 }
 
 int station_spotter_feed(station_spotter *s, const int16_t *pcm, size_t bytes,
                          char *error, size_t size) {
+  if (size)
+    error[0] = 0;
   if (bytes != 640) {
     snprintf(error, size, "native spotter requires 640 PCM bytes");
     return -1;
   }
   void *err = NULL;
   s->submit(s->detector, pcm, bytes, &err);
-  if (vendor_error(s, &err, error, size))
+  if (vendor_error(s, &err, error, size, "native spotter submit failed"))
     return -1;
   int confirmed = 0;
   for (int count = 0; count < 64; count++) {
     int32_t event = s->next_event(s->detector, &err);
-    if (vendor_error(s, &err, error, size))
+    if (vendor_error(s, &err, error, size, "native spotter event read failed"))
       return -1;
     if (event == 0)
       return confirmed;
     if (event == 2 || event == 5) {
       int32_t phrase_id = s->phrase_id(s->detector, &err);
-      if (vendor_error(s, &err, error, size))
+      if (vendor_error(s, &err, error, size, "native spotter phrase ID failed"))
         return -1;
       const char *phrase = s->phrase(s->detector, &err);
-      if (vendor_error(s, &err, error, size))
+      if (vendor_error(s, &err, error, size,
+                       "native spotter phrase read failed"))
         return -1;
       if (phrase_id == 1 && phrase && strcmp(phrase, "яндекс") == 0)
         confirmed = 1;

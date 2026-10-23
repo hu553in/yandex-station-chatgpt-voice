@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ const captureQueueFrames = 600
 const setupTimeout = 8 * time.Second
 
 var errAlicePriority = errors.New("native Alice has priority")
+var errCleanup = errors.New("resource cleanup failed")
 var errStationAudio = errors.New("Station audio")
 var errCaptureOverflow = fmt.Errorf("%w: processed capture queue overflow", errStationAudio)
 
@@ -30,11 +32,12 @@ type stationEpoch struct {
 	cancel  context.CancelCauseFunc
 	revoked atomic.Bool
 	output  *audio
+	report  *log.Logger
 }
 
 func newStationEpoch(parent context.Context, number uint64) *stationEpoch {
 	ctx, cancel := context.WithCancelCause(parent)
-	e := &stationEpoch{number: number, ctx: ctx, cancel: cancel}
+	e := &stationEpoch{number: number, ctx: ctx, cancel: cancel, report: log.New(io.Discard, "", 0)}
 	e.output = newAudio(e)
 	return e
 }
@@ -217,7 +220,7 @@ func (c *stationCapture) pushPCM(pcm []byte) error {
 	return nil
 }
 
-func runStation(parent context.Context, credentialFile string, out io.Writer) error {
+func runStation(parent context.Context, credentialFile string, settings sessionSettings, out io.Writer) error {
 	auth, err := loadCredential(credentialFile)
 	if err != nil {
 		return err
@@ -229,13 +232,17 @@ func runStation(parent context.Context, credentialFile string, out io.Writer) er
 		}
 		return errors.New("cannot connect to native Alice state")
 	}
-	return serveStation(parent, conn, auth, out, runStationEpoch, playEndCue)
+	return serveStation(parent, conn, auth, out, func(e *stationEpoch, gate *stationGate, auth credential) error {
+		return runStationEpoch(e, gate, auth, settings)
+	}, playEndCue)
 }
 
 func serveStation(parent context.Context, conn net.Conn, auth credential, out io.Writer, attempt func(*stationEpoch, *stationGate, credential) error, endCue func(context.Context) error) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	gate := newStationGate()
+	report := log.New(out, "", 0)
+	defer report.Print("Station voice stopped.")
 	stateDone := make(chan error, 1)
 	var stateWorker sync.WaitGroup
 	stateWorker.Go(func() { stateDone <- readAlice(ctx, conn, gate) })
@@ -252,6 +259,7 @@ func serveStation(parent context.Context, conn net.Conn, auth credential, out io
 		default:
 		}
 		if epoch := gate.begin(ctx); epoch != nil {
+			epoch.report = report
 			err := attempt(epoch, gate, auth)
 			var cue *stationEpoch
 			if err == nil {
@@ -261,25 +269,30 @@ func serveStation(parent context.Context, conn net.Conn, auth credential, out io
 			if cue != nil {
 				cueErr := gate.finish(cue, endCue(cue.ctx))
 				if cueErr != nil && !errors.Is(cueErr, errAlicePriority) && ctx.Err() == nil {
-					fmt.Fprintln(out, "Completion cue failed.")
+					report.Print("Completion cue failed: ", cueErr)
 				}
 			}
 			if dropped := epoch.output.playbackDrops.Load(); dropped > 0 {
-				fmt.Fprintf(out, "Playback queue overflow: %d audio frames dropped.\n", dropped)
+				report.Printf("Playback queue overflow: %d audio frames dropped.", dropped)
 			}
-			if errors.Is(err, errStationAudio) {
+			if errors.Is(err, errStationAudio) || errors.Is(err, errCleanup) {
 				return err
+			}
+			_, callFailed := errors.AsType[voiceCallError](err)
+			if callFailed {
+				report.Print("Voice attempt failed: ", err)
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if err != nil && !errors.Is(err, errAlicePriority) && !errors.Is(err, context.Canceled) {
-				if _, ok := errors.AsType[voiceCallError](err); !ok {
-					return err
-				}
-				fmt.Fprintln(out, "Voice attempt failed:", err)
+			if err != nil && !callFailed && !errors.Is(err, errAlicePriority) && !errors.Is(err, context.Canceled) {
+				return err
 			}
-			fmt.Fprintln(out, "Voice attempt closed; waiting for native Alice IDLE.")
+			if errors.Is(err, errAlicePriority) {
+				report.Print("Voice yielded to native Alice.")
+			} else if err == nil {
+				report.Print("Voice call ended normally.")
+			}
 			continue
 		}
 		select {
@@ -295,7 +308,7 @@ func serveStation(parent context.Context, conn net.Conn, auth credential, out io
 	}
 }
 
-func runStationEpoch(e *stationEpoch, gate *stationGate, auth credential) (result error) {
+func runStationEpoch(e *stationEpoch, gate *stationGate, auth credential, settings sessionSettings) (result error) {
 	detector, err := newNativeSpotter()
 	if err != nil {
 		return err
@@ -323,6 +336,7 @@ func runStationEpoch(e *stationEpoch, gate *stationGate, auth credential) (resul
 		}
 	})
 	defer func() { e.revoke(context.Canceled); reader.Wait() }()
+	e.report.Print("Yandex wake detection armed.")
 	for {
 		select {
 		case <-e.ctx.Done():
@@ -349,12 +363,10 @@ func runStationEpoch(e *stationEpoch, gate *stationGate, auth credential) (resul
 			if err != nil {
 				return err
 			}
-			err = runCall(e, auth, capture)
+			e.report.Print("Yandex wake confirmed; connecting voice.")
+			err = runCall(e, auth, capture, settings)
 			if cause := context.Cause(e.ctx); errors.Is(cause, errStationAudio) && !errors.Is(err, errStationAudio) {
 				return errors.Join(cause, err)
-			}
-			if err != nil && !errors.Is(err, errStationAudio) {
-				return voiceCallError{err}
 			}
 			return err
 		}

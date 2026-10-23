@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,6 +237,274 @@ func TestStationRearmsAfterCallFailureAndWaitsForAlice(t *testing.T) {
 	}
 }
 
+func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
+	for _, cancellation := range []string{"none", "Alice", "parent", "joined Alice", "joined parent"} {
+		for _, status := range []int{400, 422, 200} {
+			t.Run(fmt.Sprintf("%d/%s", status, cancellation), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				var requests atomic.Int32
+				httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					requests.Add(1)
+					body := "private-rejection-body"
+					if status == 200 {
+						body = "v=0\r\ns=offline\r\n"
+					}
+					return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewBufferString(body)), Header: make(http.Header), Request: req}, nil
+				})}
+				var controlFailure error
+				var controlPeer *peer
+				if status == 200 {
+					a, b := localPeer(t, ctx), localPeer(t, ctx)
+					connectLocalPeers(t, ctx, a, b)
+					if err := b.dc.SendText(`{"type":"error","message":"private-rejection-body"}`); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case <-a.ctx.Done():
+					case <-ctx.Done():
+						t.Fatal("DC rejection was not received")
+					}
+					if err := b.close(); err != nil {
+						t.Fatal(err)
+					}
+					controlPeer = a
+					controlFailure = a.outcome(errRemoteClosed)
+					if controlFailure == nil {
+						t.Fatal("received rejection became normal closure")
+					}
+				}
+				client, server := net.Pipe()
+				defer server.Close()
+				armed := make(chan struct{}, 2)
+				wake := make(chan struct{}, 1)
+				rejected := make(chan struct{})
+				done := make(chan error, 1)
+				var output bytes.Buffer
+				go func() {
+					done <- serveStation(ctx, client, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, &output, func(e *stationEpoch, gate *stationGate, auth credential) error {
+						armed <- struct{}{}
+						select {
+						case <-e.ctx.Done():
+							return context.Cause(e.ctx)
+						case <-wake:
+						}
+						_, err := exchangeOffer(e.ctx, httpClient, auth, "v=0\r\n", []byte(`{}`))
+						if err == nil {
+							err = controlFailure
+						}
+						if strings.Contains(cancellation, "Alice") {
+							gate.observe(nativeEvent{activation: true})
+						} else if strings.Contains(cancellation, "parent") {
+							cancel()
+						}
+						if strings.HasPrefix(cancellation, "joined") {
+							if controlPeer != nil {
+								err = controlPeer.outcome(context.Cause(e.ctx))
+							} else {
+								err = errors.Join(context.Cause(e.ctx), err)
+							}
+						}
+						close(rejected)
+						return voiceCallError{err}
+					}, func(context.Context) error {
+						t.Error("rejected session produced a completion cue")
+						return nil
+					})
+				}()
+				if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-armed:
+				case <-ctx.Done():
+					t.Fatal("station did not arm")
+				}
+				wake <- struct{}{}
+				select {
+				case <-rejected:
+				case <-time.After(time.Second):
+					t.Fatal("session rejection did not complete")
+				}
+				if strings.Contains(cancellation, "Alice") {
+					select {
+					case <-armed:
+						t.Fatal("station rearmed while Alice had priority")
+					case <-time.After(20 * time.Millisecond):
+					}
+					if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !strings.Contains(cancellation, "parent") {
+					select {
+					case <-armed:
+					case <-ctx.Done():
+						t.Fatal("rejected call did not rearm under IDLE")
+					}
+				}
+				if requests.Load() != 1 {
+					t.Fatal("detection rearm made a new signaling request")
+				}
+				cancel()
+				if err := <-done; err != context.Canceled {
+					t.Fatal("successful cleanup did not preserve bare cancellation", err)
+				}
+				if !bytes.Contains(output.Bytes(), []byte("Voice attempt failed")) || bytes.Contains(output.Bytes(), []byte("private")) || bytes.Contains(output.Bytes(), []byte("ended normally")) {
+					t.Fatal("rejection was hidden, classified as success, or disclosed", output.String())
+				}
+			})
+		}
+	}
+}
+
+func TestStationExpectedCancellationIsQuiet(t *testing.T) {
+	for _, parentCanceled := range []bool{false, true} {
+		t.Run(fmt.Sprint(parentCanceled), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			client, server := net.Pipe()
+			defer server.Close()
+			armed := make(chan *stationEpoch, 2)
+			done := make(chan error, 1)
+			var output bytes.Buffer
+			go func() {
+				done <- serveStation(ctx, client, credential{}, &output, func(e *stationEpoch, _ *stationGate, _ credential) error {
+					armed <- e
+					<-e.ctx.Done()
+					return runCall(e, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, newStationCapture(e), sessionSettings{})
+				}, func(context.Context) error {
+					t.Error("canceled attempt produced a completion cue")
+					return nil
+				})
+			}()
+			t.Cleanup(func() { cancel(); server.Close() })
+			if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
+				t.Fatal(err)
+			}
+			first := <-armed
+			if !parentCanceled {
+				if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 1))); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-armed:
+					t.Fatal("station rearmed while Alice was listening")
+				case <-time.After(20 * time.Millisecond):
+				}
+				if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case next := <-armed:
+					if next.number == first.number || !next.allowed() {
+						t.Fatal("Alice cancellation did not permit a fresh epoch under IDLE")
+					}
+				case <-ctx.Done():
+					t.Fatal("station did not rearm after expected cancellation")
+				}
+			}
+			cancel()
+			if err := <-done; err != context.Canceled {
+				t.Fatal("parent cancellation did not remain bare", err)
+			}
+			if strings.Contains(output.String(), "failed") || strings.Contains(output.String(), "ended normally") {
+				t.Fatal("expected cancellation was reported as failure or success", output.String())
+			}
+		})
+	}
+}
+
+func TestStationCleanupSurvivesAliceAndParentCancellation(t *testing.T) {
+	for _, cleanup := range []error{
+		fmt.Errorf("%w: native spotter submit failed", errStationAudio),
+		fmt.Errorf("%w: native spotter event read failed", errStationAudio),
+		fmt.Errorf("%w: native spotter destroy failed", errCleanup),
+		fmt.Errorf("%w: WebRTC did not close cleanly", errCleanup),
+		fmt.Errorf("%w: native spotter create failed; native spotter destroy failed", errStationAudio),
+	} {
+		for _, parentCanceled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/parent=%t", cleanup, parentCanceled), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				client, server := net.Pipe()
+				defer server.Close()
+				done := make(chan error, 1)
+				attempts := 0
+				go func() {
+					done <- serveStation(ctx, client, credential{}, io.Discard, func(e *stationEpoch, gate *stationGate, _ credential) error {
+						attempts++
+						if parentCanceled {
+							cancel()
+						} else {
+							gate.observe(nativeEvent{activation: true})
+						}
+						return errors.Join(context.Cause(e.ctx), cleanup)
+					}, func(context.Context) error {
+						t.Error("cleanup failure produced completion cue")
+						return nil
+					})
+				}()
+				if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-done:
+					cause := errAlicePriority
+					if parentCanceled {
+						cause = context.Canceled
+					}
+					if attempts != 1 || !errors.Is(err, cleanup) || !errors.Is(err, cause) {
+						t.Fatal("cancellation hid cleanup failure or original cause", err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("cleanup failure did not end service")
+				}
+			})
+		}
+	}
+}
+
+func TestCompletionCueDiagnostic(t *testing.T) {
+	for _, cueErr := range []error{errors.New("cannot play voice cue: executable missing"), context.DeadlineExceeded, errAlicePriority, context.Canceled} {
+		t.Run(cueErr.Error(), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			client, server := net.Pipe()
+			defer server.Close()
+			done := make(chan error, 1)
+			var output bytes.Buffer
+			go func() {
+				attempts := 0
+				done <- serveStation(ctx, client, credential{}, &output, func(e *stationEpoch, _ *stationGate, _ credential) error {
+					attempts++
+					if attempts == 1 {
+						return nil
+					}
+					cancel()
+					return context.Cause(e.ctx)
+				}, func(context.Context) error {
+					if cueErr == context.Canceled {
+						cancel()
+					}
+					return cueErr
+				})
+			}()
+			if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != context.Canceled {
+				t.Fatal("cue failure made service fatal", err)
+			}
+			logged := strings.Contains(output.String(), "Completion cue failed")
+			wantLog := cueErr != errAlicePriority && cueErr != context.Canceled
+			if logged != wantLog || wantLog && !strings.Contains(output.String(), cueErr.Error()) {
+				t.Fatal("cue detail lost or expected cancellation reported", output.String())
+			}
+		})
+	}
+}
+
 func TestStationNativeAudioFaultIsTerminal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
@@ -328,7 +599,7 @@ func TestStationAliceTakeoverCleanupFaultIsTerminal(t *testing.T) {
 }
 
 func TestCompletionEpochHandoff(t *testing.T) {
-	for _, action := range []string{"remote close", "Alice then IDLE", "parent canceled"} {
+	for _, action := range []string{"protocol hangup", "Alice then IDLE", "parent canceled"} {
 		t.Run(action, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -336,7 +607,7 @@ func TestCompletionEpochHandoff(t *testing.T) {
 			g.observe(nativeEvent{stateChanged: true, state: aliceIdle})
 			old := g.begin(ctx)
 			defer g.finish(old, nil)
-			old.revoke(errRemoteClosed)
+			old.revoke(errProtocolHangup)
 			switch action {
 			case "Alice then IDLE":
 				g.observe(nativeEvent{activation: true})
@@ -345,7 +616,7 @@ func TestCompletionEpochHandoff(t *testing.T) {
 				cancel()
 			}
 			cue := g.completion(ctx, old)
-			if action != "remote close" {
+			if action != "protocol hangup" {
 				if cue != nil {
 					g.finish(cue, nil)
 					t.Fatal("completion escaped takeover or cancellation")
@@ -353,7 +624,7 @@ func TestCompletionEpochHandoff(t *testing.T) {
 				return
 			}
 			if cue == nil {
-				t.Fatal("remote closure prevented completion cue")
+				t.Fatal("confirmed hangup prevented completion cue")
 			}
 			defer g.finish(cue, nil)
 			g.finish(old, nil)
@@ -383,7 +654,7 @@ func TestStationCompletionYieldsToAliceAndRearms(t *testing.T) {
 			count++
 			attempts <- e
 			if count == 1 {
-				e.revoke(errRemoteClosed)
+				e.revoke(errProtocolHangup)
 				return nil
 			}
 			<-e.ctx.Done()

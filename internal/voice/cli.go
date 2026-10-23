@@ -15,7 +15,7 @@ import (
 const help = `yandex-station-chatgpt-voice: Station ChatGPT website Voice
 
 Usage:
-  yandex-station-chatgpt-voice run
+  yandex-station-chatgpt-voice run [--voice=NAME] [--backend-model=NAME] [--backend-thinking-effort=VALUE]
   yandex-station-chatgpt-voice auth import [--session-json FILE]
   yandex-station-chatgpt-voice help
 
@@ -26,7 +26,7 @@ only while native Alice explicitly reports IDLE. Алиса stays native.
 
 func Run(ctx context.Context, args []string, in *os.File, out, errOut io.Writer) error {
 	if len(args) == 0 {
-		return runStation(ctx, credentialPath(), out)
+		return runStation(ctx, credentialPath(), sessionSettings{}, out)
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -74,21 +74,49 @@ func Run(ctx context.Context, args []string, in *os.File, out, errOut io.Writer)
 		if err := importCredential(path, c); err != nil {
 			return err
 		}
-		fmt.Fprintln(out, "Session imported into your private configuration directory.")
-		return nil
+		_, err := fmt.Fprintln(out, "Session imported into your private configuration directory.")
+		return err
 	case "run":
-		if len(args) != 1 {
-			return errors.New("usage: yandex-station-chatgpt-voice run")
+		settings, err := parseRunSettings(args[1:])
+		if errors.Is(err, flag.ErrHelp) {
+			_, err = io.WriteString(out, help)
+			return err
 		}
-		return runStation(ctx, credentialPath(), out)
+		if err != nil {
+			return err
+		}
+		return runStation(ctx, credentialPath(), settings, out)
 	default:
 		return errors.New("unknown command; run yandex-station-chatgpt-voice help")
 	}
 }
 
+func parseRunSettings(args []string) (sessionSettings, error) {
+	var settings sessionSettings
+	flags := flag.NewFlagSet("run", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&settings.Voice, "voice", "", "voice name")
+	flags.StringVar(&settings.BackendModel, "backend-model", "", "backend model name")
+	flags.StringVar(&settings.BackendThinkingEffort, "backend-thinking-effort", "", "thinking effort or disabled")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return sessionSettings{}, flag.ErrHelp
+		}
+		return sessionSettings{}, errors.New("invalid run options; see help")
+	}
+	if flags.NArg() != 0 {
+		return sessionSettings{}, errors.New("run does not accept positional arguments")
+	}
+	return settings, nil
+}
+
 func readAvailable(ctx context.Context, in *os.File, buf []byte) (int, error) {
 	for ctx.Err() == nil {
-		fds := []unix.PollFd{{Fd: int32(in.Fd()), Events: unix.POLLIN}}
+		fd := int(in.Fd())
+		if fd < 0 {
+			return 0, os.ErrClosed
+		}
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		n, err := unix.Poll(fds, 100)
 		if errors.Is(err, unix.EINTR) {
 			continue
@@ -99,7 +127,7 @@ func readAvailable(ctx context.Context, in *os.File, buf []byte) (int, error) {
 		if n == 0 {
 			continue
 		}
-		count, err := unix.Read(int(in.Fd()), buf)
+		count, err := unix.Read(fd, buf)
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
@@ -123,9 +151,25 @@ func readHiddenToken(ctx context.Context, in *os.File, out io.Writer) ([]byte, e
 	if err != nil {
 		return nil, errors.New("cannot hide terminal input")
 	}
-	defer term.Restore(fd, state)
-	fmt.Fprint(out, "ChatGPT web access token (hidden): ")
-	defer fmt.Fprint(out, "\r\n")
+	return readHiddenInput(ctx, in, out, func() error { return term.Restore(fd, state) })
+}
+
+func readHiddenInput(ctx context.Context, in *os.File, out io.Writer, restore func() error) (token []byte, result error) {
+	defer func() {
+		if restore() != nil {
+			result = errors.Join(result, errors.New("cannot restore terminal input"))
+		}
+		if _, err := fmt.Fprint(out, "\r\n"); err != nil {
+			result = errors.Join(result, errors.New("cannot finish hidden token prompt"))
+		}
+		if result != nil {
+			clear(token)
+			token = nil
+		}
+	}()
+	if _, err := fmt.Fprint(out, "ChatGPT web access token (hidden): "); err != nil {
+		return nil, errors.New("cannot write hidden token prompt")
+	}
 	value := make([]byte, 0, 4096)
 	var b [1]byte
 	for {
@@ -134,7 +178,10 @@ func readHiddenToken(ctx context.Context, in *os.File, out io.Writer) ([]byte, e
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			return nil, errors.New("credential import canceled")
+			if errors.Is(err, io.EOF) {
+				return nil, context.Canceled
+			}
+			return nil, errors.New("cannot read hidden token input")
 		}
 		switch b[0] {
 		case 3, 4:

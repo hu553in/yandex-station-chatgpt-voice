@@ -65,7 +65,7 @@ func (a *audio) open() error {
 	}
 	c, err := malgo.InitContext([]malgo.Backend{malgo.BackendAlsa}, malgo.ContextConfig{}, nil)
 	if err != nil {
-		return fmt.Errorf("%w: cannot initialize ALSA playback", errStationAudio)
+		return fmt.Errorf("%w: cannot initialize ALSA playback: %w", errStationAudio, err)
 	}
 	a.nativeContext = c
 	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
@@ -83,13 +83,13 @@ func (a *audio) open() error {
 		}
 	}})
 	if err != nil {
-		return fmt.Errorf("%w: cannot open ALSA default PCM", errStationAudio)
+		return fmt.Errorf("%w: cannot open ALSA default PCM: %w", errStationAudio, err)
 	}
 	if !a.epoch.allowed() {
 		return context.Cause(a.epoch.ctx)
 	}
 	if err := a.native.Start(); err != nil {
-		return fmt.Errorf("%w: cannot start playback", errStationAudio)
+		return fmt.Errorf("%w: cannot start playback: %w", errStationAudio, err)
 	}
 	return nil
 }
@@ -110,7 +110,7 @@ func (a *audio) close() error {
 		a.nativeContext = nil
 	}
 	if err != nil {
-		return fmt.Errorf("%w: ALSA playback did not close cleanly", errStationAudio)
+		return fmt.Errorf("%w: ALSA playback did not close cleanly: %w", errStationAudio, err)
 	}
 	return nil
 }
@@ -247,7 +247,7 @@ func playCue(parent context.Context, frequency float64) error {
 		if cause := context.Cause(ctx); cause != nil {
 			return cause
 		}
-		return errors.New("cannot play voice cue")
+		return fmt.Errorf("cannot play voice cue: %w", err)
 	}
 	return nil
 }
@@ -257,7 +257,6 @@ type paddingOpusDepacketizer struct {
 }
 
 func (p *paddingOpusDepacketizer) Unmarshal(payload []byte) ([]byte, error) {
-	// receive rejects empty non-padding RTP before it reaches SampleBuilder.
 	// Accept padding so a depacketizer error cannot skip buffered media during purge.
 	if len(payload) == 0 {
 		return nil, nil

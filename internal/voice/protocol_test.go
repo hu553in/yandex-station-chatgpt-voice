@@ -2,6 +2,7 @@ package voice
 
 import (
 	"encoding/json/v2"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func testEnvelope(t *testing.T, inner string) []byte {
 }
 
 func TestWebsiteProtocol(t *testing.T) {
-	session, err := encodeSession(time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("Asia/Kolkata", 19800)))
+	session, err := encodeSession(time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("Asia/Kolkata", 19800)), sessionSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,5 +128,64 @@ func TestPositiveRemainingQuotaIsNotTerminal(t *testing.T) {
 		if err != nil || ev != (event{}) {
 			t.Errorf("positive remaining quota ended the call: %s %+v %v", raw, ev, err)
 		}
+	}
+}
+
+func TestRunSettingsPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		args                 []string
+		voice, model, effort string
+		omit                 bool
+	}{
+		{"missing", nil, "orbit", "gpt-6-thinking", "extended", false},
+		{"empty", []string{"--voice=", "--backend-model=", "--backend-thinking-effort="}, "orbit", "gpt-6-thinking", "extended", false},
+		{"empty voice", []string{"--voice=", "--backend-model=future", "--backend-thinking-effort=other"}, "orbit", "future", "other", false},
+		{"empty model", []string{"--voice=future", "--backend-model=", "--backend-thinking-effort=other"}, "future", "gpt-6-thinking", "other", false},
+		{"empty effort", []string{"--voice=future", "--backend-model=other", "--backend-thinking-effort="}, "future", "other", "extended", false},
+		{"whitespace", []string{"--voice= \t ", "--backend-model=\n", "--backend-thinking-effort= "}, " \t ", "\n", " ", false},
+		{"literal", []string{"--voice=  голос\t\n$'\"`;&|<>#", "--backend-model=-future/model", "--backend-thinking-effort=任意"}, "  голос\t\n$'\"`;&|<>#", "-future/model", "任意", false},
+		{"disabled", []string{"--voice=disabled", "--backend-model=disabled", "--backend-thinking-effort=disabled"}, "disabled", "disabled", "", true},
+		{"case", []string{"--backend-thinking-effort=Disabled"}, "orbit", "gpt-6-thinking", "Disabled", false},
+		{"leading space", []string{"--backend-thinking-effort= disabled"}, "orbit", "gpt-6-thinking", " disabled", false},
+		{"trailing space", []string{"--backend-thinking-effort=disabled "}, "orbit", "gpt-6-thinking", "disabled ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings, err := parseRunSettings(tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := settings
+			data, err := encodeSession(time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("Asia/Kolkata", 19800)), settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings != before {
+				t.Fatal("encoding changed the startup snapshot")
+			}
+			var got map[string]any
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			id, ok := got["voice_session_id"].(string)
+			if !ok || len(id) != 36 || strings.ToUpper(id) != id {
+				t.Fatal("invalid session ID")
+			}
+			want := map[string]any{
+				"backend_reasoning_effort": "instant", "language_code": "auto",
+				"requested_default_model": "", "voice": tc.voice, "voice_session_id": id,
+				"voice_status_request_id": id, "timezone_offset_min": float64(-330), "timezone": "Asia/Kolkata",
+				"voice_mode": "wingman", "model_slug": "", "model_slug_advanced": "",
+				"client_tools": []any{}, "history_and_training_disabled": false,
+				"conversation_mode":        map[string]any{"kind": "primary_assistant"},
+				"enable_message_streaming": true, "backend_model": tc.model, "deprecate_celsius": false,
+			}
+			if !tc.omit {
+				want["backend_thinking_effort"] = tc.effort
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("payload got %#v, want %#v", got, want)
+			}
+		})
 	}
 }

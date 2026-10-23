@@ -61,7 +61,8 @@ process() {
     running=0
     [ ! -L "$runtime" ] || die 'Runtime directory must not be a symlink.'
     mkdir -p "$runtime"
-    [ "$(stat -c '%u:%a' "$runtime")" = 0:700 ] || die 'Runtime directory must be root-owned and private.'
+    set -- $(LC_ALL=C ls -ldn "$runtime")
+    [ "$1:$3" = drwx------:0 ] || die 'Runtime directory must be root-owned and private.'
     [ ! -L "$runtime/client.pid" ] || die 'PID file must not be a symlink.'
     [ -e "$runtime/client.pid" ] || return 0
     [ -f "$runtime/client.pid" ] || die 'PID file must be regular.'
@@ -108,15 +109,16 @@ start_client() {
     chmod 600 "$log"
     rm -f "$runtime/client.pid"
     expected=$(readlink -f "$app/client") || die 'Cannot resolve installed executable.'
-    LD_LIBRARY_PATH=__LIBS__ nohup sh -c '
+    LD_LIBRARY_PATH=__LIBS__ setsid nohup sh -c '
         set -eu
         runtime=$1
         app=$2
+        shift 2
         [ ! -L "$runtime/.pid-new" ] || exit 1
         printf "%s\n" "$$" > "$runtime/.pid-new"
         mv -f "$runtime/.pid-new" "$runtime/client.pid"
-        exec "$app/client" run
-    ' sh "$runtime" "$app" < /dev/null >> "$log" 2>&1 &
+        exec "$app/client" run "$@"
+    ' sh "$runtime" "$app" "$@" < /dev/null >> "$log" 2>&1 &
     pid=$!
     case "$pid" in ''|*[!0-9]*) die 'Startup did not return a PID.' ;; esac
     [ "$pid" -gt 1 ] || die 'Invalid startup PID.'
@@ -212,7 +214,12 @@ def adb_shell(args, script, quiet=False):
     finally:
         failed = sys.exc_info()[0] is not None
         cleanup_error = None
-        if remote is not None:
+        if args.uncertain:
+            print(
+                "Remote state is unknown; temporary remote files are retained if present. Inspect before retrying.",
+                file=sys.stderr,
+            )
+        elif remote is not None:
             try:
                 _adb_shell_inline(args, f"rm -f {shlex.quote(remote)}", quiet=True)
             except (OSError, RuntimeError, KeyboardInterrupt) as error:
@@ -265,10 +272,8 @@ def owned(nonce):
 def release(args, nonce, stage):
     cleanup = f"rm -f {shlex.quote(stage)}\n" if stage else ""
     if args.uncertain:
-        if stage:
-            adb_shell(args, owned(nonce) + cleanup, quiet=True)
         print(
-            "Remote state is unknown; mutation lock retained. Inspect before retrying.",
+            "Remote state is unknown; staging file and mutation lock are retained if present. Inspect before retrying.",
             file=sys.stderr,
         )
     else:
@@ -331,14 +336,19 @@ echo 'Client installed and stopped. Use make start or make install restart to ac
 
 def session_input(path):
     if path:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > LIMIT:
-                raise ValueError(
-                    "Selected session JSON must be a regular file no larger than 1 MiB."
-                )
-            data = stream.read(LIMIT + 1)
+        try:
+            fd = os.open(
+                path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+            )
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > LIMIT:
+                    raise ValueError(
+                        "Selected session JSON must be a regular file no larger than 1 MiB."
+                    )
+                data = stream.read(LIMIT + 1)
+        except OSError:
+            raise ValueError("Cannot read selected session JSON file.") from None
         try:
             value = json.loads(data) if len(data) <= LIMIT else None
         except (ValueError, UnicodeError):
@@ -435,8 +445,10 @@ def main():
     args = parser.parse_args()
     args.serial = f"{args.ip}:5555"
     args.uncertain = False
-    if args.session_json and args.action != "auth":
+    if args.session_json is not None and args.action != "auth":
         parser.error("--session-json is only valid with auth")
+    if args.action == "auth" and args.session_json is None:
+        args.session_json = os.environ.get("SESSION_JSON")
     if args.action == "connect":
         output = adb_run(args, "connect", args.serial).decode(errors="replace").strip()
         if output not in (
@@ -459,6 +471,25 @@ def main():
         raise SystemExit(subprocess.call(command))
     data = arm_binary(BINARY) if args.action == "install" else None
     session = session_input(args.session_json) if args.action == "auth" else None
+    operation = "stop_client"
+    if args.action in ("start", "restart"):
+        options = [
+            "--voice=" + os.environ.get("VOICE", ""),
+            "--backend-model=" + os.environ.get("BACKEND_MODEL", ""),
+            "--backend-thinking-effort="
+            + os.environ.get("BACKEND_THINKING_EFFORT", ""),
+        ]
+        try:
+            for option in options:
+                option.encode("utf-8")
+                if "\0" in option:
+                    raise ValueError("Session settings cannot contain NUL.")
+        except UnicodeError:
+            raise ValueError(
+                "Session settings must be representable as UTF-8."
+            ) from None
+        launch = "start_client " + shlex.join(options)
+        operation = launch if args.action == "start" else "stop_client\n" + launch
     nonce = secrets.token_hex(16)
     stage = (
         f"{APP}/.{'auth' if session is not None else 'candidate'}-{nonce}"
@@ -479,18 +510,13 @@ def main():
             elif args.action == "auth":
                 auth(args, nonce, stage, local)
             else:
-                operation = {
-                    "start": "start_client",
-                    "stop": "stop_client",
-                    "restart": "stop_client\nstart_client",
-                }[args.action]
                 output = adb_shell(args, owned(nonce) + operation + "\n")
                 print(output.decode(errors="replace").strip() or "Client stopped.")
         finally:
             failed = sys.exc_info()[0] is not None
             try:
                 release(args, nonce, stage)
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, KeyboardInterrupt):
                 if not failed:
                     raise
                 print(

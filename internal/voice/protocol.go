@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -18,7 +19,13 @@ type event struct {
 	err   error
 }
 
-func encodeSession(now time.Time) ([]byte, error) {
+type sessionSettings struct {
+	Voice                 string
+	BackendModel          string
+	BackendThinkingEffort string
+}
+
+func encodeSession(now time.Time, settings sessionSettings) ([]byte, error) {
 	_, east := now.Zone()
 	zone := now.Location().String()
 	if zone == "Local" {
@@ -37,16 +44,20 @@ func encodeSession(now time.Time) ([]byte, error) {
 		}
 	}
 	id := strings.ToUpper(uuid.New().String())
-	return json.Marshal(map[string]any{
+	payload := map[string]any{
 		"backend_reasoning_effort": "instant", "language_code": "auto",
-		"requested_default_model": "", "voice": "orbit", "voice_session_id": id,
+		"requested_default_model": "", "voice": cmp.Or(settings.Voice, "orbit"), "voice_session_id": id,
 		"voice_status_request_id": id, "timezone_offset_min": -east / 60, "timezone": zone,
 		"voice_mode": "wingman", "model_slug": "", "model_slug_advanced": "",
 		"client_tools": []string{}, "history_and_training_disabled": false,
 		"conversation_mode":        map[string]string{"kind": "primary_assistant"},
-		"enable_message_streaming": true, "backend_model": "gpt-6-thinking",
-		"backend_thinking_effort": "extended", "deprecate_celsius": false,
-	})
+		"enable_message_streaming": true, "backend_model": cmp.Or(settings.BackendModel, "gpt-6-thinking"),
+		"deprecate_celsius": false,
+	}
+	if effort := cmp.Or(settings.BackendThinkingEffort, "extended"); effort != "disabled" {
+		payload["backend_thinking_effort"] = effort
+	}
+	return json.Marshal(payload)
 }
 
 type wireEvent struct {

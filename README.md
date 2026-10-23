@@ -7,8 +7,8 @@ the Station and connects directly to ChatGPT, so you do not need a computer duri
 - **Account.** Uses your ChatGPT account's Voice access and limits. No OpenAI API key is needed.
 - **Hardware.** Tested only on Station Mini 2.
 
-[Setup](#setup) · [Token](#add-a-chatgpt-token) · [Use](#use) · [Manage](#manage) ·
-[Troubleshooting](#troubleshooting) · [Development](#development)
+[Setup](#setup) · [Token](#add-a-chatgpt-token) · [Settings](#choose-voice-session-settings) ·
+[Use](#use) · [Manage](#manage) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
 ## Setup
 
@@ -98,6 +98,34 @@ make restart
 
 The file must contain an `accessToken` string. An OpenAI API key does not work here.
 
+## Choose voice session settings
+
+Save these optional values in your computer's `config.mk`, then run `make restart`:
+
+```make
+VOICE = orbit
+BACKEND_MODEL = gpt-6-thinking
+BACKEND_THINKING_EFFORT = extended
+```
+
+Missing or exactly empty values use the defaults shown above. Set
+`BACKEND_THINKING_EFFORT = disabled` to omit the thinking-effort parameter. Only that exact value
+has special meaning. Names are unrestricted, and all other strings keep their case and whitespace.
+ChatGPT determines which values it accepts.
+
+Settings are read at startup. `make restart` applies changes; `make start` leaves a running client
+alone. No rebuild, reinstall, or token import is needed.
+
+`config.mk` is Make source. Write a literal dollar as `$$` and a literal hash in an assignment as
+`\#`. Quotes become part of the value. Make expressions such as `$(shell ...)` execute as Make code.
+The evaluated values pass to the client as literal arguments.
+
+The executable also accepts ordinary run flags, for example
+`client run --voice=orbit --backend-model=gpt-6-thinking --backend-thinking-effort=disabled`. Use
+shell quoting for literal text and `--name=value` for values beginning with a hyphen. Running
+without arguments or flags uses the defaults. Environment and process argument limits apply, and NUL
+cannot be transported.
+
 ## Use
 
 1. Say **"Яндекс"** on its own.
@@ -110,7 +138,10 @@ respond. After Alice finishes, say "Яндекс" again to start a new GPT call.
 resume.
 
 The client sets no idle timeout or call-duration limit. ChatGPT can still end a call because of
-account limits, and a lost connection can interrupt it.
+account limits. A temporarily disconnected transport can recover on the existing peer. If Pion
+reports failure or the control channel closes, the call ends. A fresh "Яндекс" starts another call.
+Only a decoded ChatGPT hangup permits the normal completion tone. Transport closure alone is a call
+failure and produces no completion tone.
 
 ## Manage
 
@@ -154,11 +185,15 @@ Root access and the original Alice services are kept.
 - **401 or expired session.** Import a fresh token with `make auth`, then run `make restart`.
 - **403 or connection setup failure.** Check that Voice works in the browser and that the Station's
   network can reach ChatGPT. These failures do not necessarily mean the token expired.
+- **400, 422, or a voice session error.** Check the configured strings and service compatibility,
+  then run `make restart` after changes. Rejections log a status or fixed error without the response
+  text or rejected value. Detection rearms for a fresh wake word, with no automatic signaling retry.
 - **A required runtime file is missing.** The client uses the firmware's audio services, libraries,
   and Yandex wake-word model. Other firmware layouts are not supported by the current code.
 - **An operation leaves a mutation lock.** Check that no install, token import, start, or stop
   command is still running. Inspect `/data/.yandex-station-chatgpt-voice.lock` through `make shell`
-  before removing the stale lock. After a timeout, inspect the Station's state before retrying.
+  before removing the stale lock. An uncertain result retains remote temporary scripts, staging
+  files, and the lock. Inspect the Station's state and retained files before cleanup or retrying.
 
 The client uses the ChatGPT website's unofficial voice protocol. Website changes can break it.
 
@@ -174,12 +209,12 @@ For host checks, install a C compiler, pkg-config, and the host Opus development
 make check
 ```
 
-This checks formatting, helper syntax, Go race tests, and `go vet` without contacting a Station.
+This checks formatting, helper syntax, local launch behavior, Go race tests, and `go vet` without
+contacting a Station. Local Pion tests drop and restore virtual packets with production callbacks.
 `make fmt` formats Go files. `make clean` removes `build/`, preserving the toolchain cache, local
 configuration, and the Station's saved token. `make help` lists all targets.
 
-Voice and model parameters are in [internal/voice/protocol.go](internal/voice/protocol.go).
-[config.example.mk](config.example.mk) lists the build and tool overrides.
+[config.example.mk](config.example.mk) lists the session settings and build and tool overrides.
 
 ## Credits
 

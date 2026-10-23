@@ -12,6 +12,8 @@ import (
 
 const maxCredentialBytes = 1 << 20
 
+var removeCredentialTemp = os.Remove
+
 type credential struct {
 	AccessToken string `json:"accessToken"`
 	DeviceID    string `json:"deviceId"`
@@ -54,7 +56,7 @@ func readSession(in io.Reader) (credential, error) {
 	return c, nil
 }
 
-func importCredential(path string, c credential) error {
+func importCredential(path string, c credential) (result error) {
 	c.AccessToken = strings.TrimSpace(c.AccessToken)
 	if c.DeviceID == "" {
 		if old, err := loadCredential(path); err == nil {
@@ -86,7 +88,11 @@ func importCredential(path string, c credential) error {
 	if err != nil {
 		return errors.New("cannot create private credential file")
 	}
-	defer os.Remove(f.Name())
+	defer func() {
+		if err := removeCredentialTemp(f.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, errors.New("cannot remove temporary credential file"))
+		}
+	}()
 	if err = f.Chmod(0600); err == nil {
 		_, err = f.Write(data)
 	}
