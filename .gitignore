@@ -1,0 +1,11 @@
+/build/
+/.cache/
+.env
+.env.*
+session.json
+.session-*
+*.token
+*.key
+*.pem
+.DS_Store
+/config.mk
