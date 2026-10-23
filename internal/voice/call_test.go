@@ -308,7 +308,7 @@ func TestNativePriorityCancelsSignalingAndRejectsLateAnswer(t *testing.T) {
 	g.observe(nativeEvent{stateChanged: true, state: aliceIdle})
 	close(release)
 	<-done
-	if e.allowed() || g.activate(e) {
+	if e.allowed() || g.activate(e) == nil {
 		t.Fatal("late HTTP answer revived revoked epoch")
 	}
 }

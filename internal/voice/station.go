@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -27,12 +26,11 @@ type voiceCallError struct{ error }
 func (e voiceCallError) Unwrap() error { return e.error }
 
 type stationEpoch struct {
-	number  uint64
-	ctx     context.Context
-	cancel  context.CancelCauseFunc
-	revoked atomic.Bool
-	output  *audio
-	report  *log.Logger
+	number uint64
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	output *audio
+	report *log.Logger
 }
 
 func newStationEpoch(parent context.Context, number uint64) *stationEpoch {
@@ -43,12 +41,11 @@ func newStationEpoch(parent context.Context, number uint64) *stationEpoch {
 }
 
 func (e *stationEpoch) revoke(cause error) {
-	e.revoked.Store(true)
 	e.cancel(cause)
 }
 
 func (e *stationEpoch) allowed() bool {
-	return !e.revoked.Load() && e.ctx.Err() == nil
+	return e.ctx.Err() == nil
 }
 
 type stationGate struct {
@@ -95,10 +92,16 @@ func (g *stationGate) begin(ctx context.Context) *stationEpoch {
 	return g.current
 }
 
-func (g *stationGate) activate(e *stationEpoch) bool {
+func (g *stationGate) activate(e *stationEpoch) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.state == aliceIdle && g.current == e && g.number == e.number && e.allowed()
+	if cause := context.Cause(e.ctx); cause != nil {
+		return cause
+	}
+	if g.state != aliceIdle || g.current != e || g.number != e.number {
+		return errAlicePriority
+	}
+	return nil
 }
 
 func (g *stationGate) completion(parent context.Context, old *stationEpoch) *stationEpoch {
@@ -352,8 +355,8 @@ func runStationEpoch(e *stationEpoch, gate *stationGate, auth credential, settin
 			if !confirmed {
 				continue
 			}
-			if !gate.activate(e) {
-				return errAlicePriority
+			if err := gate.activate(e); err != nil {
+				return err
 			}
 			if err := capture.beginConnecting(); err != nil {
 				return err

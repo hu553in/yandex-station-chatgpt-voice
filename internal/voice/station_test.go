@@ -111,7 +111,7 @@ func TestGateRevokesBeforeCleanupAndRejectsLateWake(t *testing.T) {
 	}
 	g.observe(nativeEvent{stateChanged: true, state: aliceIdle})
 	e := g.begin(t.Context())
-	if e == nil || !g.activate(e) {
+	if e == nil || g.activate(e) != nil {
 		t.Fatal("explicit IDLE did not arm")
 	}
 	g.observe(nativeEvent{activation: true})
@@ -119,16 +119,16 @@ func TestGateRevokesBeforeCleanupAndRejectsLateWake(t *testing.T) {
 		t.Fatal("activation did not directly revoke media and call")
 	}
 	g.observe(nativeEvent{stateChanged: true, state: aliceIdle})
-	if g.activate(e) || g.begin(t.Context()) != nil {
+	if g.activate(e) == nil || g.begin(t.Context()) != nil {
 		t.Fatal("late detector or new call escaped before cleanup")
 	}
 	g.finish(e, nil)
 	next := g.begin(t.Context())
-	if next == nil || next.number == e.number || !g.activate(next) {
+	if next == nil || next.number == e.number || g.activate(next) != nil {
 		t.Fatal("fresh epoch did not rearm after cleanup")
 	}
 	defer g.finish(next, nil)
-	if g.activate(e) {
+	if g.activate(e) == nil {
 		t.Fatal("old epoch activated new call")
 	}
 	var workers sync.WaitGroup
@@ -139,7 +139,7 @@ func TestGateRevokesBeforeCleanupAndRejectsLateWake(t *testing.T) {
 		}
 	})
 	workers.Wait()
-	if next.allowed() || g.activate(next) {
+	if next.allowed() || g.activate(next) == nil {
 		t.Fatal("concurrent state revocation lost")
 	}
 }
@@ -155,7 +155,7 @@ func TestNativePrioritySurvivesMaskedSetupError(t *testing.T) {
 	}
 	g.observe(nativeEvent{stateChanged: true, state: aliceIdle})
 	next := g.begin(t.Context())
-	if next == nil || !g.activate(next) || g.activate(e) {
+	if next == nil || g.activate(next) != nil || g.activate(e) == nil {
 		t.Fatal("native takeover prevented a fresh wake after cleanup")
 	}
 	if err := g.finish(next, masked); !errors.Is(err, masked) {
@@ -628,7 +628,7 @@ func TestCompletionEpochHandoff(t *testing.T) {
 			}
 			defer g.finish(cue, nil)
 			g.finish(old, nil)
-			if !cue.allowed() || cue.number == old.number || old.allowed() || g.activate(old) || g.completion(ctx, old) != nil {
+			if !cue.allowed() || cue.number == old.number || old.allowed() || g.activate(old) == nil || g.completion(ctx, old) != nil {
 				t.Fatal("completion did not transfer ownership exclusively")
 			}
 			g.observe(nativeEvent{activation: true})
@@ -756,7 +756,7 @@ func TestQuietAliceAndTransportEOF(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("state EOF did not end reader")
 	}
-	if e.allowed() || gate.activate(e) {
+	if e.allowed() || gate.activate(e) == nil {
 		t.Fatal("state EOF left call permitted")
 	}
 }

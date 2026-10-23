@@ -24,7 +24,8 @@ You need:
 Before starting the client, open the Station's settings in **Дом с Алисой** and select **Алиса** as
 its wake word. This setting is required so **Яндекс** can start ChatGPT.
 
-Run `make` commands from the repository root.
+Run `make` commands from the repository root. Its path must not contain whitespace: Opus/libtool
+does not support it.
 
 ### 1. Set the Station's address
 

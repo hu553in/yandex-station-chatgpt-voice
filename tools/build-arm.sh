@@ -2,6 +2,12 @@
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
+case "$PWD" in *[[:space:]]*)
+	echo 'Build path must not contain whitespace (Opus/libtool limitation).' >&2
+	exit 2
+	;;
+esac
+
 GO=${GO:-go}
 UV=${UV:-uv}
 PYTHON=${PYTHON:-python3}
