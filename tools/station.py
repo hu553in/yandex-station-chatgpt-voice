@@ -2,7 +2,6 @@
 """Manage the fixed Station client through explicitly selected root ADB."""
 
 import argparse
-import getpass
 import ipaddress
 import json
 import os
@@ -14,8 +13,8 @@ import stat
 import struct
 import subprocess
 import sys
+import termios
 import tempfile
-import warnings
 
 APP = "/data/yandex-station-chatgpt-voice"
 LOG = "/tmp/yandex-station-chatgpt-voice.log"
@@ -367,12 +366,39 @@ def session_input(path):
         raise ValueError(
             "Hidden auth requires a terminal; use SESSION_JSON=/path/to/file for an explicit file."
         )
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", getpass.GetPassWarning)
-        token = getpass.getpass("ChatGPT web access token (hidden): ")
-    if len(token.encode()) > LIMIT:
-        raise ValueError("Session input exceeds 1 MiB.")
-    return {"accessToken": token}
+    fd = sys.stdin.fileno()
+    original = termios.tcgetattr(fd)
+    hidden = termios.tcgetattr(fd)
+    hidden[3] &= ~(termios.ECHO | termios.ICANON)
+    hidden[6][termios.VMIN] = 1
+    hidden[6][termios.VTIME] = 0
+    token = bytearray()
+    try:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, hidden)
+        print("ChatGPT web access token (hidden): ", end="", file=sys.stderr, flush=True)
+        while True:
+            char = os.read(fd, 1)
+            if char in (b"", b"\x04"):
+                raise EOFError
+            if char in (b"\r", b"\n"):
+                if len(token) > 32768:
+                    raise ValueError("Access token exceeds 32768 bytes.")
+                try:
+                    return {"accessToken": token.decode("ascii")}
+                except UnicodeError:
+                    raise ValueError(
+                        "Paste the ChatGPT web access token as ASCII text."
+                    ) from None
+            if len(token) > 32768:
+                continue
+            if char in (b"\x08", b"\x7f"):
+                if token:
+                    token.pop()
+                continue
+            token.extend(char)
+    finally:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, original)
+        print(file=sys.stderr, flush=True)
 
 
 def auth(args, nonce, stage, local):
@@ -531,7 +557,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, RuntimeError, getpass.GetPassWarning) as error:
+    except (OSError, ValueError, RuntimeError, termios.error) as error:
         print(f"Error: {error}", file=sys.stderr)
         raise SystemExit(1)
     except (KeyboardInterrupt, EOFError):

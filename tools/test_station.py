@@ -1,10 +1,15 @@
 import contextlib
+import errno
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -393,17 +398,125 @@ class AuthInputTest(unittest.TestCase):
                     station.main()
                 selected.assert_called_once_with(expected)
                 acquire.assert_not_called()
-        with (
-            mock.patch.object(sys.stdin, "isatty", return_value=True),
-            mock.patch.object(sys.stderr, "isatty", return_value=True),
-            mock.patch.object(
-                station.getpass, "getpass", return_value="synthetic-token"
-            ) as hidden,
-        ):
-            self.assertEqual(
-                station.session_input(""), {"accessToken": "synthetic-token"}
+
+    def hidden_input(self, payload, interrupt=False):
+        master, slave = pty.openpty()
+        program = (
+            "import hashlib, sys, termios\n"
+            "import station\n"
+            "before = termios.tcgetattr(0)\n"
+            "try:\n"
+            " token = station.session_input('')['accessToken'].encode()\n"
+            " print('RESULT', len(token), hashlib.sha256(token).hexdigest(), flush=True)\n"
+            "except (ValueError, EOFError, KeyboardInterrupt) as error:\n"
+            " print('RESULT', type(error).__name__, str(error), flush=True)\n"
+            "print('RESTORED', termios.tcgetattr(0) == before, flush=True)\n"
+            "sys.stdin.readline()\n"
+        )
+        output = bytearray()
+        process = None
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-c", program],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+                env=dict(os.environ, PYTHONPATH=str(SOURCE / "tools")),
             )
-            hidden.assert_called_once()
+            os.set_blocking(master, False)
+            offset = 0
+            signaled = False
+            acknowledged = False
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                pending = (
+                    [master]
+                    if b"(hidden): " in output and offset < len(payload)
+                    else []
+                )
+                ready, writable, _ = select.select([master], pending, [], 0.01)
+                if ready:
+                    try:
+                        data = os.read(master, 65536)
+                        if not data:
+                            process.wait(timeout=5)
+                            break
+                        output.extend(data)
+                    except OSError as error:
+                        if error.errno != errno.EIO:
+                            raise
+                        process.wait(timeout=5)
+                        break
+                if process.poll() is not None and not ready:
+                    break
+                if b"(hidden): " not in output:
+                    continue
+                if writable and offset < len(payload):
+                    try:
+                        offset += os.write(master, payload[offset : offset + 256])
+                    except BlockingIOError:
+                        pass
+                if interrupt and offset == len(payload) and not signaled:
+                    process.send_signal(signal.SIGINT)
+                    signaled = True
+                if b"RESTORED " in output and offset == len(payload) and not acknowledged:
+                    os.write(master, b"\n")
+                    acknowledged = True
+            self.assertIsNotNone(
+                process.poll(), "Hidden input did not finish: " + output.decode(errors="replace")
+            )
+            self.assertEqual(process.returncode, 0, output.decode(errors="replace"))
+            self.assertIn(b"RESTORED True", output)
+            self.assertNotIn(b"PRIVATE-TOKEN", output)
+            self.assertNotIn(b"A" * 32, output)
+            return output.decode()
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            os.close(master)
+            os.close(slave)
+
+    def test_hidden_paste_accepts_long_tokens_and_restores_terminal(self):
+        for size in (5000, 32768):
+            with self.subTest(size=size):
+                token = b"PRIVATE-TOKEN" + b"A" * (size - len(b"PRIVATE-TOKEN"))
+                payload = (
+                    token + b"Z\x7f\r\n" if size < 32768 else token + b"\n"
+                )
+                output = self.hidden_input(payload)
+                self.assertIn(
+                    f"RESULT {size} {hashlib.sha256(token).hexdigest()}", output
+                )
+
+    def test_hidden_paste_rejection_and_cancel_restore_terminal(self):
+        for payload, interrupt, expected in (
+            (
+                b"PRIVATE-TOKEN" + b"A" * (32769 - len(b"PRIVATE-TOKEN")) + b"\n",
+                False,
+                "ValueError Access token exceeds 32768 bytes.",
+            ),
+            (
+                b"PRIVATE-TOKEN" + b"A" * (32769 - len(b"PRIVATE-TOKEN")) + b"\x7f\n",
+                False,
+                "ValueError Access token exceeds 32768 bytes.",
+            ),
+            (
+                b"PRIVATE-TOKEN" + b"A" * 40000 + b"\n",
+                False,
+                "ValueError Access token exceeds 32768 bytes.",
+            ),
+            (
+                b"PRIVATE-TOKEN\xff\n",
+                False,
+                "ValueError Paste the ChatGPT web access token as ASCII text.",
+            ),
+            (b"PRIVATE-TOKEN\x04", False, "EOFError"),
+            (b"PRIVATE-TOKEN", True, "KeyboardInterrupt"),
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn("RESULT " + expected, self.hidden_input(payload, interrupt))
 
     def test_other_actions_ignore_environment_and_reject_explicit_path(self):
         for action in (
