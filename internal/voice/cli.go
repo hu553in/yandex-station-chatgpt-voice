@@ -17,11 +17,13 @@ const help = `yandex-station-chatgpt-voice: Station ChatGPT website Voice
 Usage:
   yandex-station-chatgpt-voice run [--voice=NAME] [--backend-model=NAME] [--backend-thinking-effort=VALUE]
   yandex-station-chatgpt-voice auth import [--session-json FILE]
+  yandex-station-chatgpt-voice auth status
   yandex-station-chatgpt-voice help
 
 Import your own ChatGPT web access token at the hidden prompt, or select one
 session JSON file containing accessToken. The Station starts GPT on Яндекс
 only while native Alice explicitly reports IDLE. Алиса stays native.
+auth status prints the saved token's unverified expiry in UTC, without the token.
 `
 
 func Run(ctx context.Context, args []string, in *os.File, out, errOut io.Writer) error {
@@ -33,8 +35,11 @@ func Run(ctx context.Context, args []string, in *os.File, out, errOut io.Writer)
 		_, err := io.WriteString(out, help)
 		return err
 	case "auth":
+		if len(args) == 2 && args[1] == "status" {
+			return writeAuthStatus(credentialPath(), out)
+		}
 		if len(args) < 2 || args[1] != "import" {
-			return errors.New("usage: yandex-station-chatgpt-voice auth import [--session-json FILE]")
+			return errors.New("usage: yandex-station-chatgpt-voice auth import [--session-json FILE] | auth status")
 		}
 		flags := flag.NewFlagSet("auth import", flag.ContinueOnError)
 		flags.SetOutput(errOut)

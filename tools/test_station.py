@@ -37,7 +37,7 @@ process() {
 proc_stat() { actual_start=fixture; }
 verify_process() {
     running=0
-    [ ! -f "$app/alive" ] || running=1
+    if kill -0 "$pid" 2>/dev/null; then running=1; fi
 }
 """
 
@@ -77,6 +77,17 @@ verify_process() {
             raise AssertionError(
                 "Local fake shell failed\n" + result.stderr.decode(errors="replace")
             )
+        if b"Client started.\n" in result.stdout:
+            pid = int((root / "runtime/client.pid").read_text())
+            deadline = time.monotonic() + 5
+            while not (root / "app/alive").exists() or (
+                json.loads((root / "process.json").read_text())["pid"] != pid
+            ):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "Local fake client did not publish its launch record"
+                    )
+                time.sleep(0.01)
         sys.stderr.write(result.stderr.decode(errors="replace"))
         return result.stdout
 
@@ -150,15 +161,18 @@ class LaunchSettingsTest(unittest.TestCase):
             "import json, os, signal, sys, time\n"
             "from pathlib import Path\n"
             "root = Path(os.environ['STATION_TEST_ROOT'])\n"
+            "if sys.argv[1:] == ['auth', 'status']:\n"
+            "    print('Saved token expiry (unverified): 2100-01-01T00:00:00Z')\n"
+            "    sys.exit(0)\n"
             "alive = root / 'app/alive'\n"
             "def stop(*args):\n"
             "    alive.unlink(missing_ok=True)\n"
             "    sys.exit(0)\n"
             "signal.signal(signal.SIGTERM, stop)\n"
             "(root / 'process.json').write_text(json.dumps({'pid': os.getpid(), 'session': os.getsid(0)}))\n"
-            "alive.touch()\n"
             "with (root / 'argv.jsonl').open('a') as output:\n"
             "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "alive.touch()\n"
             "while True: time.sleep(0.1)\n"
         )
         client.chmod(0o700)
@@ -227,6 +241,43 @@ class LaunchSettingsTest(unittest.TestCase):
             if path.exists()
             else []
         )
+
+    def test_status_reports_expiry_and_tolerates_old_or_missing_client(self):
+        self.configure()
+        client = self.root / "app/client"
+        for name, expiry in (
+            ("current", "2100-01-01T00:00:00Z"),
+            ("old", "unknown"),
+            ("missing", "unknown"),
+        ):
+            with self.subTest(name=name):
+                if name == "old":
+                    client.write_text(
+                        "#!/bin/sh\necho 'unsupported command' >&2\nexit 1\n"
+                    )
+                elif name == "missing":
+                    client.unlink()
+                result = subprocess.run(
+                    [
+                        "make",
+                        "--no-print-directory",
+                        f"PYTHON={sys.executable}",
+                        "ADB=fake-local-only",
+                        "status",
+                    ],
+                    cwd=self.root,
+                    env=self.environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(
+                    f"Saved token expiry (unverified): {expiry}\n", result.stdout
+                )
+                self.assertIn("Client stopped.", result.stdout)
+                self.assertNotIn("unsupported command", result.stdout + result.stderr)
+        self.assertEqual(self.launches(), [])
 
     def test_launcher_preserves_argv_and_detaches_session(self):
         marker = self.root / "MUST_NOT_RUN"

@@ -394,7 +394,7 @@ def status(args):
     output = adb_shell(
         args,
         COMMON
-        + r"""
+        + f"""
 echo 'Root ADB verified.'
 if [ -e "$app" ]; then
     [ -d "$app" ] && [ ! -L "$app" ] || die 'App directory is not a real directory.'
@@ -407,6 +407,9 @@ if [ -e "$app" ]; then
             echo "$name missing"
         fi
     done
+    if ! LD_LIBRARY_PATH={shlex.quote(LIBS)} "$app/client" auth status 2>/dev/null; then
+        echo 'Saved token expiry (unverified): unknown'
+    fi
     process
     if [ "$running" = 1 ]; then echo "Client running with verified PID $pid."; else echo 'Client stopped.'; fi
 else

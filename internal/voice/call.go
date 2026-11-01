@@ -291,7 +291,7 @@ func exchangeOffer(ctx context.Context, client *http.Client, auth credential, of
 	defer response.Body.Close()
 	switch response.StatusCode {
 	case http.StatusUnauthorized:
-		return "", errors.New("ChatGPT session expired or rejected (401); run yandex-station-chatgpt-voice auth import with a fresh own web access token")
+		return "", errors.New("ChatGPT session expired or rejected (401); run yandex-station-chatgpt-voice auth import with a fresh own web access token, then restart the client")
 	case http.StatusForbidden:
 		return "", errors.New("ChatGPT rejected voice access (403); account entitlement or edge restrictions may prevent this native client")
 	case http.StatusOK, http.StatusCreated:

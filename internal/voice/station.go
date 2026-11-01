@@ -244,7 +244,7 @@ func serveStation(parent context.Context, conn net.Conn, auth credential, out io
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	gate := newStationGate()
-	report := log.New(out, "", 0)
+	report := log.New(out, "", log.LstdFlags|log.LUTC)
 	defer report.Print("Station voice stopped.")
 	stateDone := make(chan error, 1)
 	var stateWorker sync.WaitGroup

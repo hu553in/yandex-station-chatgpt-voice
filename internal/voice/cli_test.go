@@ -35,6 +35,24 @@ func TestRunOptions(t *testing.T) {
 	}
 }
 
+func TestAuthStatusCommand(t *testing.T) {
+	if _, err := os.Lstat(credentialPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refusing to test auth status against an existing or inaccessible Station session")
+	}
+	for _, args := range [][]string{
+		{"auth", "status", "private-marker"}, {"auth", "status", "--session-json=private-marker"},
+	} {
+		var out, diagnostics bytes.Buffer
+		err := Run(t.Context(), args, nil, &out, &diagnostics)
+		if err == nil || !strings.HasPrefix(err.Error(), "usage:") || strings.Contains(err.Error()+out.String()+diagnostics.String(), "private-marker") {
+			t.Fatalf("auth status accepted extra arguments or disclosed them: %v", err)
+		}
+	}
+	if err := Run(t.Context(), []string{"auth", "status"}, nil, io.Discard, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "no imported session;") {
+		t.Fatalf("auth status did not reach the saved credential: %v", err)
+	}
+}
+
 type failingPrompt struct{}
 
 func (failingPrompt) Write([]byte) (int, error) { return 0, errors.New("private writer details") }

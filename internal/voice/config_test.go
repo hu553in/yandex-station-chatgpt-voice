@@ -2,6 +2,7 @@ package voice
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -95,5 +96,59 @@ func TestCredentialRenameAndCleanupFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(temporary); err != nil {
 		t.Fatal("fixture did not leave a temporary file to report", err)
+	}
+}
+
+func TestAuthStatus(t *testing.T) {
+	jwt := func(claims string) string {
+		return "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".synthetic-private-signature"
+	}
+	for _, tc := range []struct {
+		name, token, want string
+	}{
+		{"future", jwt(`{"exp":4102444800,"private":"synthetic-private-claim"}`), "2100-01-01T00:00:00Z"},
+		{"expired", jwt(`{"exp":1}`), "1970-01-01T00:00:01Z (expired)"},
+		{"zero", jwt(`{"exp":0}`), "1970-01-01T00:00:00Z (expired)"},
+		{"opaque", "synthetic-private-token", "unknown"},
+		{"absent", jwt(`{"private":"synthetic-private-claim"}`), "unknown"},
+		{"null", jwt(`{"exp":null}`), "unknown"},
+		{"string", jwt(`{"exp":"synthetic-private-claim"}`), "unknown"},
+		{"invalid JSON", jwt(`{"exp":1`), "unknown"},
+		{"invalid base64", "header.%%%.signature", "unknown"},
+		{"out of range", jwt(`{"exp":253402300800}`), "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.json")
+			if err := importCredential(path, credential{AccessToken: tc.token, DeviceID: "offline-device"}); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			if err := writeAuthStatus(path, &output); err != nil {
+				t.Fatal(err)
+			}
+			if output.String() != "Saved token expiry (unverified): "+tc.want+"\n" {
+				t.Fatal("status did not return only expiry metadata")
+			}
+			loaded, err := loadCredential(path)
+			if err != nil || loaded.AccessToken != tc.token {
+				t.Fatal("status changed credential acceptance or contents")
+			}
+		})
+	}
+}
+
+func TestAuthStatusCredentialFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synthetic-private-path.json")
+	var output bytes.Buffer
+	err := writeAuthStatus(path, &output)
+	if err == nil || output.Len() != 0 || strings.Contains(err.Error(), "synthetic-private") {
+		t.Fatal("missing session was accepted or disclosed private details")
+	}
+	if err := os.WriteFile(path, []byte(`{"accessToken":"synthetic-private-token"`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err = writeAuthStatus(path, &output)
+	if err == nil || output.Len() != 0 || strings.Contains(err.Error(), "synthetic-private") {
+		t.Fatal("invalid session was accepted or disclosed private details")
 	}
 }

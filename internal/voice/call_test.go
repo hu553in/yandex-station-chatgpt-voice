@@ -113,6 +113,9 @@ func TestFixedOriginSignalingAndFailures(t *testing.T) {
 			} else if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), private) {
 				t.Fatalf("unsafe or wrong error: %v", err)
 			}
+			if tc.status == 401 && !strings.Contains(err.Error(), "restart the client") {
+				t.Fatal("expired-session recovery omitted the restart")
+			}
 			if requests != 1 {
 				t.Fatal("redirect or retry performed")
 			}

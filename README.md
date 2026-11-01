@@ -90,6 +90,10 @@ make restart
 No rebuild or reinstall is needed. The running client reads the token at startup, so importing alone
 does not replace the token in its memory. Tokens are not refreshed automatically.
 
+`make status` shows the saved token's expiry in UTC, with `expired` if that time has passed. This
+reads unverified token metadata, not ChatGPT's acceptance of the token. An opaque token or an
+unavailable expiry shows `unknown`. The token itself is never printed.
+
 To import a JSON file instead of using the prompt:
 
 ```sh
@@ -146,18 +150,20 @@ failure and produces no completion tone.
 
 ## Manage
 
-| Command                | Action                                                                           |
-| ---------------------- | -------------------------------------------------------------------------------- |
-| `make status`          | Inspect the installed files, client process, and required Station runtime files. |
-| `make start`           | Start the installed client.                                                      |
-| `make stop`            | Stop the client. Alice remains available.                                        |
-| `make restart`         | Stop and start the client.                                                       |
-| `make logs`            | Follow the client log. Press Ctrl+C to stop following.                           |
-| `make shell`           | Open an ADB shell on the selected Station.                                       |
-| `make install restart` | Build, install, and start an updated client. The saved token is preserved.       |
+| Command                | Action                                                                              |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| `make status`          | Inspect the client process, installed files, saved token expiry, and runtime files. |
+| `make start`           | Start the installed client.                                                         |
+| `make stop`            | Stop the client. Alice remains available.                                           |
+| `make restart`         | Stop and start the client.                                                          |
+| `make logs`            | Follow the client log. Press Ctrl+C to stop following.                              |
+| `make shell`           | Open an ADB shell on the selected Station.                                          |
+| `make install restart` | Build, install, and start an updated client. The saved token is preserved.          |
 
 The client does not start automatically after a Station reboot. Run `make connect start` to start it
 again. The computer can disconnect once the client is running.
+
+Client logs include UTC timestamps. `make logs` follows `/tmp/yandex-station-chatgpt-voice.log`.
 
 ### Remove the client
 
@@ -183,6 +189,10 @@ Root access and the original Alice services are kept.
   `make connect`.
 - **No ready tone.** Run `make status`, then `make logs`. Confirm that Alice is idle and that the
   Station itself can reach ChatGPT. `status` checks local files and the process, not ChatGPT access.
+- **Client stopped or `Station audio: ... i/o timeout`.** A native audio fault stops the client. It
+  does not restart automatically. Inspect `make logs`, then run `make restart`. Wait more than three
+  seconds and run `make status` again. The audio service can connect without delivering audio, so
+  the initial `armed` message alone does not prove capture works.
 - **401 or expired session.** Import a fresh token with `make auth`, then run `make restart`.
 - **403 or connection setup failure.** Check that Voice works in the browser and that the Station's
   network can reach ChatGPT. These failures do not necessarily mean the token expired.

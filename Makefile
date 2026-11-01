@@ -29,7 +29,7 @@ help:
 	  'build    Build ARM build/yandex-station-chatgpt-voice' \
 	  'clean    Remove build output; retain config, credentials and toolchain cache' \
 	  'connect  Connect ADB to STATION_IP:5555' \
-	  'status   Inspect root, install, process and session permissions' \
+	  'status   Inspect root, install, process, session permissions and token expiry' \
 	  'install  Build, verify, stop the old client and install; leave stopped' \
 	  'start    Start the installed client' \
 	  'stop     Stop only the verified client process' \

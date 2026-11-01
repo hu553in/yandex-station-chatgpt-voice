@@ -1,12 +1,15 @@
 package voice
 
 import (
+	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"uuid"
 )
 
@@ -133,4 +136,30 @@ func loadCredential(path string) (credential, error) {
 		return credential{}, errors.New("invalid saved session; run yandex-station-chatgpt-voice auth import again")
 	}
 	return c, nil
+}
+
+func writeAuthStatus(path string, out io.Writer) error {
+	c, err := loadCredential(path)
+	if err != nil {
+		return err
+	}
+	expiry := "unknown"
+	if parts := strings.Split(c.AccessToken, "."); len(parts) == 3 {
+		data, err := base64.RawURLEncoding.DecodeString(parts[1])
+		defer clear(data)
+		var claims struct {
+			Expires *int64 `json:"exp"`
+		}
+		if err == nil && json.Unmarshal(data, &claims) == nil && claims.Expires != nil {
+			expires := time.Unix(*claims.Expires, 0).UTC()
+			if text, err := expires.MarshalText(); err == nil {
+				expiry = string(text)
+				if !time.Now().Before(expires) {
+					expiry += " (expired)"
+				}
+			}
+		}
+	}
+	_, err = fmt.Fprintln(out, "Saved token expiry (unverified):", expiry)
+	return err
 }
