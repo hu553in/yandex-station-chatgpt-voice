@@ -18,6 +18,8 @@ const setupTimeout = 8 * time.Second
 
 var errAlicePriority = errors.New("native Alice has priority")
 var errCleanup = errors.New("resource cleanup failed")
+
+//nolint:staticcheck // Station and Opus are proper names in established user-visible diagnostics.
 var errStationAudio = errors.New("Station audio")
 var errCaptureOverflow = fmt.Errorf("%w: processed capture queue overflow", errStationAudio)
 
@@ -203,6 +205,7 @@ func (c *stationCapture) pushPCM(pcm []byte) error {
 		output = c.input
 	}
 	for len(pcm) > 0 {
+		//nolint:gosec // PCM uses the same 16 bits for signed samples and little-endian words.
 		c.partial.pcm[c.used] = int16(binary.LittleEndian.Uint16(pcm))
 		pcm = pcm[2:]
 		c.used++
@@ -247,7 +250,14 @@ func runStation(parent context.Context, sessionFile string, settings sessionSett
 	}, playEndCue)
 }
 
-func serveStation(parent context.Context, conn net.Conn, out io.Writer, attempt func(*stationEpoch, *stationGate) error, endCue func(context.Context) error) error {
+//nolint:gocognit // Attempt completion, Alice priority, fatal cleanup, and rearming are one ordered transition.
+func serveStation(
+	parent context.Context,
+	conn net.Conn,
+	out io.Writer,
+	attempt func(*stationEpoch, *stationGate) error,
+	endCue func(context.Context) error,
+) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	gate := newStationGate()
@@ -268,6 +278,7 @@ func serveStation(parent context.Context, conn net.Conn, out io.Writer, attempt 
 			return fmt.Errorf("native Alice state transport ended: %w", err)
 		default:
 		}
+		//nolint:nestif // Keep dependent admission and state transitions together.
 		if epoch := gate.begin(ctx); epoch != nil {
 			epoch.report = report
 			err := attempt(epoch, gate)
@@ -318,6 +329,7 @@ func serveStation(parent context.Context, conn net.Conn, out io.Writer, attempt 
 	}
 }
 
+//nolint:gocognit // Wake admission and detector/capture teardown must stay ordered against Alice revocation.
 func runStationEpoch(e *stationEpoch, gate *stationGate, sessionFile string, settings sessionSettings) (result error) {
 	detector, err := newNativeSpotter()
 	if err != nil {
@@ -341,8 +353,8 @@ func runStationEpoch(e *stationEpoch, gate *stationGate, sessionFile string, set
 	capture := newStationCapture(e)
 	var reader sync.WaitGroup
 	reader.Go(func() {
-		if err := readCapture(e.ctx, conn, capture); err != nil {
-			e.revoke(fmt.Errorf("%w: %w", errStationAudio, err))
+		if readCaptureErr := readCapture(e.ctx, conn, capture); readCaptureErr != nil {
+			e.revoke(fmt.Errorf("%w: %w", errStationAudio, readCaptureErr))
 		}
 	})
 	defer func() { e.revoke(context.Canceled); reader.Wait() }()
@@ -355,30 +367,33 @@ func runStationEpoch(e *stationEpoch, gate *stationGate, sessionFile string, set
 			if !e.allowed() {
 				return context.Cause(e.ctx)
 			}
-			confirmed, err := detector.feed(frame.pcm[:])
-			if err != nil {
-				return err
+			confirmed, attemptErr := detector.feed(frame.pcm[:])
+			if attemptErr != nil {
+				return attemptErr
 			}
 			if !confirmed {
 				continue
 			}
-			if err := gate.activate(e); err != nil {
-				return err
+			if activateErr := gate.activate(e); activateErr != nil {
+				return activateErr
 			}
-			if err := capture.beginConnecting(); err != nil {
-				return err
+			if beginConnectingErr := capture.beginConnecting(); beginConnectingErr != nil {
+				return beginConnectingErr
 			}
-			err = detector.close()
+			attemptErr = detector.close()
 			detector = nil
-			if err != nil {
-				return err
+			if attemptErr != nil {
+				return attemptErr
 			}
 			e.report.Print("Yandex wake confirmed; connecting voice.")
-			err = runCall(e, sessionFile, capture, settings)
-			if cause := context.Cause(e.ctx); errors.Is(cause, errStationAudio) && !errors.Is(err, errStationAudio) {
-				return errors.Join(cause, err)
+			attemptErr = runCall(e, sessionFile, capture, settings)
+			if cause := context.Cause(
+				e.ctx,
+			); errors.Is(cause, errStationAudio) &&
+				!errors.Is(attemptErr, errStationAudio) {
+				return errors.Join(cause, attemptErr)
 			}
-			return err
+			return attemptErr
 		}
 	}
 }

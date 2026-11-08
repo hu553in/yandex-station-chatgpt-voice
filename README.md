@@ -1,5 +1,7 @@
 # ChatGPT Voice for Yandex Station
 
+[![CI](https://github.com/hu553in/yandex-station-chatgpt-voice/actions/workflows/ci.yml/badge.svg)](https://github.com/hu553in/yandex-station-chatgpt-voice/actions/workflows/ci.yml)
+
 Talk to ChatGPT through a rooted Yandex Station's microphones and speaker. The client runs on the
 Station and connects directly to ChatGPT. Once it is running, the computer can disconnect.
 
@@ -73,17 +75,18 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 The last two commands use the
 [official uv installer](https://docs.astral.sh/uv/getting-started/installation/). Ubuntu's Go
 package can be older than this project requires. With the default
-[automatic toolchain selection](https://go.dev/doc/toolchain), `make setup` downloads the required
+[automatic toolchain selection](https://go.dev/doc/toolchain), `make build` downloads the required
 Go version from `go.mod`.
 
 For another Linux distribution, install Git, make, curl, tar, Python 3, pkg-config, `adb`, uv, and
-Go 1.27.3 or later. Native Windows setup is not covered here.
+Go at the version declared in [`go.mod`](go.mod) or newer. Native Windows setup is not covered here.
 
 </details>
 
 `make login` opens [Google Chrome](https://www.google.com/chrome/) in a separate, empty window.
 Install Chrome if you do not have it. To use Chromium instead, see [sign in](#4-sign-in-to-chatgpt).
-The first `make login` downloads the Playwright library with uv. It does not download a browser.
+uv installs the locked Playwright library declared in `pyproject.toml`. It does not download a
+browser.
 
 Download the project into a folder **without spaces in its path**. The Opus build cannot use a path
 with whitespace.
@@ -93,12 +96,12 @@ mkdir -p ~/Projects
 cd ~/Projects
 git clone https://github.com/hu553in/yandex-station-chatgpt-voice.git
 cd yandex-station-chatgpt-voice
-make setup && make build
+make build
 ```
 
-`setup` downloads Go dependencies, the pinned Zig compiler, and Opus, then builds the ARM audio
-library. It prints compiler feature probes. Judge completion by the build checkpoint below. A host
-Opus development package is needed only for [developer checks](#developer-checks).
+`build` downloads Go modules, the pinned Zig compiler and Opus, then builds the ARM audio library.
+It prints compiler feature probes. Judge completion by the build checkpoint below. A host Opus
+development package is needed only for [developer checks](#developer-checks).
 
 **Checkpoint:** `make build` finishes without an error and creates
 `build/yandex-station-chatgpt-voice`. This is the Linux ARM client for the Station, not a Mac app.
@@ -491,8 +494,8 @@ the interrupted command.
 
 Return to [computer setup](#2-prepare-the-computer). Follow the Homebrew or uv installer's PATH
 instructions and open a new terminal. If Go is at least 1.21 but automatic toolchain selection was
-disabled, run `export GOTOOLCHAIN=auto` in this terminal, then repeat `make setup && make build`.
-For older Go, install Go 1.27.3 or later.
+disabled, run `export GOTOOLCHAIN=auto` in this terminal, then repeat `make build`. For older Go,
+install Go at the version declared in [`go.mod`](go.mod) or newer.
 
 </details>
 
@@ -518,37 +521,64 @@ Root access and the original Alice services remain.
 
 ## Developer checks
 
-Normal installation does not need these checks. To work on the code, install host Opus and a C
-compiler first:
+Normal installation does not need these checks. For development, install
+[Bun](https://bun.sh/docs/installation), [Node.js](https://nodejs.org/),
+[golangci-lint](https://golangci-lint.run/docs/welcome/install/local/) and
+[shfmt](https://github.com/mvdan/sh), plus host Opus and a C compiler:
 
 ```sh
 # macOS, with Command Line Tools already installed
-brew install opus
+brew install opus golangci-lint shfmt
 ```
 
 ```sh
-# Ubuntu
+# Ubuntu, after installing the tools linked above
 sudo apt-get install -y build-essential libopus-dev
 ```
 
-Then run `make check`. It checks formatting, helper syntax, local launch behavior, Go race tests,
-and `go vet` without contacting a Station. Local Pion tests drop and restore virtual packets with
-production callbacks. Session renewal tests use a local HTTPS server, never ChatGPT.
+Developer dependencies can build Rust extensions when a Python wheel is unavailable. Install
+[Rust](https://rustup.rs/) if uv reports a missing Rust compiler. Normal installation and sign-in do
+not install developer tools.
 
-`make check` does not need a browser. To drive installed Chrome through the sign-in helper against a
-synthetic local page, with no account and no ChatGPT traffic, run:
+Then run:
 
 ```sh
-STATION_BROWSER_TEST=1 python3 -B -m unittest discover -s tools -p 'test_browser_login.py'
+make install-deps
+make check
+```
+
+This checks formatting, Go/Python/C/shell lint, types, dependencies, known vulnerabilities, unused
+code, Bandit, host tests, the ARM build, Renovate and GitHub Actions. Tests use local fixtures,
+virtual Pion packets and a local HTTPS server. They do not contact a Station or ChatGPT.
+`make lint-fix` applies supported fixes; `make check-fix` applies them and then repeats all checks.
+
+`make check` does not need a browser. To check installed Chrome against a synthetic local page, with
+no account or ChatGPT traffic, run:
+
+```sh
+STATION_BROWSER_TEST=1 uv run --locked python -B -m unittest discover -s tools -p 'test_browser_login.py'
 ```
 
 Add `STATION_BROWSER_HEADED=1` to watch the window, or `CHROME=/path/to/chrome` to test another
-browser. This proves the browser handling only, not a real ChatGPT sign-in.
+browser. This proves browser handling only, not a real ChatGPT sign-in.
 
-- `make build` targets Linux ARMv7 with the hard-float ABI. The pinned Zig compiler and static ARM
-  Opus library live under `.cache/`.
-- `make fmt` formats Go files. `make clean` removes `build/` and keeps the toolchain cache, local
-  configuration, and the Station's saved session.
+Go dependencies and tools live in `go.mod`; Python dependencies, including Playwright, live in
+`pyproject.toml` and `uv.lock`. Renovate extends the shared
+[Go](https://github.com/hu553in/common-things/blob/main/presets/renovate/go.json) and
+[Python](https://github.com/hu553in/common-things/blob/main/presets/renovate/python.json) presets.
+The build script declares Zig and Opus once; Renovate updates Opus and its archive checksum
+together. The shared presets and uv wait three days for new package releases.
+
+After `make install-deps`, enable the project checks and Conventional Commit hooks once per clone:
+
+```sh
+uv run --locked prek install
+```
+
+`make build` targets Linux ARMv7 with the hard-float ABI. Its compiler wrappers and static ARM Opus
+library live under `.cache/`. `make clean` removes `build/` and keeps that cache, local settings and
+the Station's saved session. Running `make` without a target lists commands and does not touch a
+Station.
 
 ## Credits
 

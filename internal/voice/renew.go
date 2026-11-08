@@ -21,13 +21,17 @@ const maxSessionResponseBytes = 256 << 10
 
 var errRenewTimeout = errors.New("ChatGPT session renewal timed out; check the Station's network")
 var errSignedOut = errors.New("ChatGPT ended the saved web session; run make login on the computer")
-var errInvalidSessionCookie = errors.New("ChatGPT session renewal returned an invalid session cookie; run make login on the computer")
+
+var errInvalidSessionCookie = errors.New(
+	"ChatGPT session renewal returned an invalid session cookie; run make login on the computer",
+)
 
 func needsRenewal(token string, now time.Time) bool {
 	expires, ok := tokenExpiry(token)
 	return !ok || expires.Sub(now) <= renewWithin
 }
 
+//nolint:funlen // Keep request validation, response bounds, and sanitized failures together.
 func renew(ctx context.Context, client *http.Client, s webSession) (webSession, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sessionURL, nil)
 	if err != nil {
@@ -47,7 +51,9 @@ func renew(ctx context.Context, client *http.Client, s webSession) (webSession, 
 		if ctx.Err() != nil {
 			return webSession{}, context.Cause(ctx)
 		}
-		return webSession{}, errors.New("ChatGPT session renewal HTTPS request failed; check the Station's network, TLS, and service availability")
+		return webSession{}, errors.New(
+			"ChatGPT session renewal HTTPS request failed; check the Station's network, TLS, and service availability",
+		)
 	}
 	defer response.Body.Close()
 	status := response.StatusCode
@@ -55,9 +61,15 @@ func renew(ctx context.Context, client *http.Client, s webSession) (webSession, 
 	case status >= 300 && status < 400:
 		return webSession{}, fmt.Errorf("ChatGPT session renewal returned an unexpected redirect (HTTP %d)", status)
 	case response.Header.Get("Cf-Mitigated") == "challenge" || strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/html"):
-		return webSession{}, fmt.Errorf("ChatGPT's edge challenged session renewal from the Station's network (HTTP %d)", status)
+		return webSession{}, fmt.Errorf(
+			"ChatGPT's edge challenged session renewal from the Station's network (HTTP %d)",
+			status,
+		)
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return webSession{}, fmt.Errorf("ChatGPT rejected the saved web session (HTTP %d); run make login on the computer", status)
+		return webSession{}, fmt.Errorf(
+			"ChatGPT rejected the saved web session (HTTP %d); run make login on the computer",
+			status,
+		)
 	case status != http.StatusOK:
 		return webSession{}, fmt.Errorf("ChatGPT session renewal returned HTTP %d", status)
 	}
@@ -87,7 +99,9 @@ func renew(ctx context.Context, client *http.Client, s webSession) (webSession, 
 	}
 	now := time.Now()
 	if expires, ok := tokenExpiry(renewed.AccessToken); ok && !expires.After(now) {
-		return webSession{}, errors.New("ChatGPT session renewal returned an expired access token; run make login on the computer")
+		return webSession{}, errors.New(
+			"ChatGPT session renewal returned an expired access token; run make login on the computer",
+		)
 	}
 	renewed.Cookies, err = rotateFamily(s.Cookies, response.Header.Values("Set-Cookie"), now)
 	if err != nil {
@@ -98,6 +112,8 @@ func renew(ctx context.Context, client *http.Client, s webSession) (webSession, 
 
 // rotateFamily replaces the whole session-token family whenever a response touches it,
 // because NextAuth rewrites every chunk and expires the leftovers in one response.
+//
+//nolint:gocognit // One response atomically replaces the entire session-token family, including deletions.
 func rotateFamily(old []sessionCookie, header []string, now time.Time) ([]sessionCookie, error) {
 	live := map[string]string{}
 	touched := false
@@ -105,7 +121,10 @@ func rotateFamily(old []sessionCookie, header []string, now time.Time) ([]sessio
 		name, _, _ := strings.Cut(line, "=")
 		name = strings.TrimSpace(name)
 		if suffix, chunk := strings.CutPrefix(name, sessionCookieName+"."); chunk {
-			if n, err := strconv.Atoi(suffix); err != nil || n < 0 || n >= maxSessionCookies || strconv.Itoa(n) != suffix {
+			if n, err := strconv.Atoi(
+				suffix,
+			); err != nil || n < 0 || n >= maxSessionCookies ||
+				strconv.Itoa(n) != suffix {
 				return nil, errInvalidSessionCookie
 			}
 		} else if name != sessionCookieName {
@@ -116,7 +135,8 @@ func rotateFamily(old []sessionCookie, header []string, now time.Time) ([]sessio
 			return nil, errInvalidSessionCookie
 		}
 		touched = true
-		if cookie.Value == "" || cookie.MaxAge < 0 || cookie.MaxAge == 0 && !cookie.Expires.IsZero() && !cookie.Expires.After(now) {
+		if cookie.Value == "" || cookie.MaxAge < 0 ||
+			cookie.MaxAge == 0 && !cookie.Expires.IsZero() && !cookie.Expires.After(now) {
 			delete(live, name)
 			continue
 		}
@@ -170,8 +190,8 @@ func sessionForCall(ctx context.Context, path string, client *http.Client, repor
 	if err != nil {
 		return credential{}, err
 	}
-	if err := writeSessionFile(path, renewed); err != nil {
-		return credential{}, err
+	if writeSessionFileErr := writeSessionFile(path, renewed); writeSessionFileErr != nil {
+		return credential{}, writeSessionFileErr
 	}
 	if ctx.Err() != nil {
 		return credential{}, context.Cause(ctx)
@@ -198,7 +218,7 @@ func importBrowserSession(ctx context.Context, path string, client *http.Client,
 	}
 	defer unlock()
 	deviceID := uuid.New().String()
-	if previous, err := readPrivateFile(path); err == nil {
+	if previous, readPrivateFileErr := readPrivateFile(path); readPrivateFileErr == nil {
 		var old credential
 		if json.Unmarshal(previous, &old) == nil && validDeviceID(old.DeviceID) {
 			deviceID = old.DeviceID

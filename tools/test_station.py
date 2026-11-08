@@ -2,19 +2,18 @@ import contextlib
 import io
 import json
 import os
-from pathlib import Path
 import shlex
 import shutil
-import subprocess
+import subprocess  # nosec B404 # explicit local argv, no host shell
 import sys
 import tempfile
 import time
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import station
-
 
 SOURCE = Path(__file__).resolve().parent.parent
 SETTING_NAMES = ("VOICE", "BACKEND_MODEL", "BACKEND_THINKING_EFFORT")
@@ -50,14 +49,13 @@ verify_process() {
         if "cleanup_boot" in script:
             script = script.replace(
                 station.COMMON + overrides,
-                station.COMMON + overrides
-                + f"\nawk() {{ echo ro; }}\nmount() {{ echo \"$*\" >> {shlex.quote(str(root / 'mounts'))}; }}\nsync() {{ :; }}\n",
+                station.COMMON
+                + overrides
+                + f'\nawk() {{ echo ro; }}\nmount() {{ echo "$*" >> {shlex.quote(str(root / "mounts"))}; }}\nsync() {{ :; }}\n',  # noqa: E501
             )
         if (root / "init-supported").exists():
             script = script.replace(station.boot_check(), "boot_scripts_ok() { return 0; }\n")
-        script = script.replace(
-            "/etc/init.d/.station-voice.", str(root / "hook-tmp.")
-        )
+        script = script.replace("/etc/init.d/.station-voice.", str(root / "hook-tmp."))
         for original, replacement in (
             ("app=/data/yandex-station-chatgpt-voice", root / "app"),
             ("runtime=/tmp/yandex-station-chatgpt-voice", root / "runtime"),
@@ -67,34 +65,31 @@ verify_process() {
             ("system_lock=/data/local/tmp/station-root.lock", root / "system-lock"),
         ):
             name = original.split("=", 1)[0]
-            script = script.replace(
-                original, name + "=" + shlex.quote(str(replacement))
-            )
+            script = script.replace(original, name + "=" + shlex.quote(str(replacement)))
         return script.replace(station.APP + "/", str(root / "app") + "/").replace(
             '[ "$(id -u)" = 0 ]', "[ 0 = 0 ]"
         )
 
     def fake_adb(args, *command, quiet=False):
+        del args, quiet
         if command[0] in ("push", "pull"):
             paths = [
-                str(root / "app") + path[len(station.APP):]
+                str(root / "app") + path[len(station.APP) :]
                 if path.startswith(station.APP + "/")
                 else path
                 for path in command[1:]
             ]
             shutil.copyfile(*paths)
             return b""
-        if command[0] != "shell" or len(command) != 2:
+        if command[0] != "shell" or len(command) != 2:  # noqa: PLR2004
             raise AssertionError("Unexpected fake ADB command")
         lexer = shlex.shlex(command[1], posix=True, punctuation_chars=";")
         if [next(lexer), next(lexer)] != ["sh", "-c"]:
             raise AssertionError("Unexpected shell wrapper")
         original = next(lexer)
-        outer = command[1].replace(
-            shlex.quote(original), shlex.quote(local_script(original)), 1
-        )
-        result = subprocess.run(
-            ["/bin/sh", "-c", outer], capture_output=True, timeout=10
+        outer = command[1].replace(shlex.quote(original), shlex.quote(local_script(original)), 1)
+        result = subprocess.run(  # nosec B603 # local test fixture or fixed tool argv
+            ["/bin/sh", "-c", outer], capture_output=True, timeout=10, check=False
         )
         if result.returncode:
             raise AssertionError(
@@ -107,19 +102,23 @@ verify_process() {
                 json.loads((root / "process.json").read_text())["pid"] != pid
             ):
                 if time.monotonic() >= deadline:
-                    raise AssertionError(
-                        "Local fake client did not publish its launch record"
-                    )
+                    raise AssertionError("Local fake client did not publish its launch record")
                 time.sleep(0.01)
         sys.stderr.write(result.stderr.decode(errors="replace"))
         return result.stdout
 
     real_install = station.install
-    install = real_install if (root / "real-install").exists() else lambda *args: None
+    install = real_install if (root / "real-install").exists() else lambda *_args: None
     candidate = root / "candidate" if (root / "real-install").exists() else station.BINARY
     with (
         mock.patch.object(station, "adb_run", fake_adb),
-        mock.patch.object(station, "arm_binary", side_effect=lambda p: p.read_bytes() if (root / "real-install").exists() else b"synthetic-arm"),
+        mock.patch.object(
+            station,
+            "arm_binary",
+            side_effect=lambda p: (
+                p.read_bytes() if (root / "real-install").exists() else b"synthetic-arm"
+            ),
+        ),
         mock.patch.object(station, "BINARY", candidate),
         mock.patch.object(station, "install", side_effect=install),
     ):
@@ -128,28 +127,32 @@ verify_process() {
 
 class BootScriptTest(unittest.TestCase):
     def test_saved_startup_respects_pause_and_mutation_lock(self):
-        subprocess.run(["sh", "-n"], input=station.BOOT_STUB, check=True)
+        subprocess.run(["sh", "-n"], input=station.BOOT_STUB, check=True)  # nosec B603 B607 # local test fixture or fixed tool argv
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             app = root / "app"
             app.mkdir()
             lock = root / "lock"
             launched = root / "launched"
-            script = station.start_script(["--voice=custom voice"]).decode().replace(
-                station.COMMON,
-                "set -eu\n"
-                + f"app={shlex.quote(str(app))}\nlock={shlex.quote(str(lock))}\n"
-                + f"start_client() {{ printf '%s\\n' \"$@\" > {shlex.quote(str(launched))}; }}\n",
+            script = (
+                station.start_script(["--voice=custom voice"])
+                .decode()
+                .replace(
+                    station.COMMON,
+                    "set -eu\n"
+                    + f"app={shlex.quote(str(app))}\nlock={shlex.quote(str(lock))}\n"
+                    + f"start_client() {{ printf '%s\\n' \"$@\" > {shlex.quote(str(launched))}; }}\n",  # noqa: E501
+                )
             )
             (app / "stopped").touch()
-            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)
+            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)  # nosec B603 B607 # local test fixture or fixed tool argv
             self.assertFalse(launched.exists())
             (app / "stopped").unlink()
             lock.mkdir()
-            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)
+            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)  # nosec B603 B607 # local test fixture or fixed tool argv
             self.assertFalse(launched.exists())
             lock.rmdir()
-            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)
+            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)  # nosec B603 B607 # local test fixture or fixed tool argv
             self.assertEqual(launched.read_text(), "--voice=custom voice\n")
             self.assertFalse(lock.exists())
             launched.unlink()
@@ -157,8 +160,10 @@ class BootScriptTest(unittest.TestCase):
                 'mkdir "$lock"',
                 'mkdir() { : > "$app/stopped"; command mkdir "$@"; }\nmkdir "$lock"',
             )
-            subprocess.run(["sh"], input=racing_script, text=True, capture_output=True, check=True)
-            self.assertFalse(launched.exists(), "boot ignored a stop completed before lock admission")
+            subprocess.run(["sh"], input=racing_script, text=True, capture_output=True, check=True)  # nosec B603 B607 # local test fixture or fixed tool argv
+            self.assertFalse(
+                launched.exists(), "boot ignored a stop completed before lock admission"
+            )
             self.assertFalse(lock.exists())
 
 
@@ -168,13 +173,11 @@ class RuntimeDirectoryTest(unittest.TestCase):
             root = Path(directory)
             runtime = root / "runtime"
             runtime.mkdir(mode=0o700)
-            private_mode = (
-                subprocess.check_output(
-                    ["ls", "-ldn", str(runtime)], env={**os.environ, "LC_ALL": "C"}
-                )
-                .decode()
-                .split()[0]
+            # Fixed local ls argv reads only this test's temporary runtime directory.
+            mode_output = subprocess.check_output(  # nosec B603 B607
+                ["ls", "-ldn", str(runtime)], env={**os.environ, "LC_ALL": "C"}
             )
+            private_mode = mode_output.decode().split()[0]
             for name, mode, owner, symlink, expected in (
                 ("private", 0o700, os.getuid(), False, 0),
                 ("public", 0o755, os.getuid(), False, 1),
@@ -194,8 +197,8 @@ class RuntimeDirectoryTest(unittest.TestCase):
                         f"\nruntime={shlex.quote(str(selected))}\n"
                         "stat() { return 127; }\nprocess\n"
                     )
-                    result = subprocess.run(
-                        ["/bin/sh", "-c", script], capture_output=True, timeout=5
+                    result = subprocess.run(  # nosec B603 # local test fixture or fixed tool argv
+                        ["/bin/sh", "-c", script], capture_output=True, timeout=5, check=False
                     )
                     self.assertEqual(result.returncode, expected, result.stderr)
 
@@ -221,11 +224,14 @@ class FakeStationTest(unittest.TestCase):
             "from pathlib import Path\n"
             "root = Path(os.environ['STATION_TEST_ROOT'])\n"
             "if sys.argv[1:] == ['help']:\n"
-            "    print('Import a token.' if (root / 'old-client').exists() else 'Sign in with make login.')\n"
+            "    print('Import a token.' if (root / 'old-client').exists() "
+            "else 'Sign in with make login.')\n"
             "    sys.exit(0)\n"
             "if sys.argv[1:3] == ['auth', 'import'] and sys.argv[3] == '--session-json':\n"
             "    if (root / 'import-fails').exists():\n"
-            "        print('2026/11/08 00:00:00 Error: ChatGPT rejected the saved web session (HTTP 403); run make login on the computer', file=sys.stderr)\n"
+            "        print('2026/11/08 00:00:00 Error: ChatGPT rejected the "
+            "saved web session (HTTP 403); run make login on the computer', "
+            "file=sys.stderr)\n"
             "        sys.exit(1)\n"
             "    (root / 'imported.json').write_bytes(Path(sys.argv[4]).read_bytes())\n"
             "    print('Signed in. The Station saved a renewable ChatGPT session.')\n"
@@ -240,7 +246,8 @@ class FakeStationTest(unittest.TestCase):
             "    alive.unlink(missing_ok=True)\n"
             "    sys.exit(0)\n"
             "signal.signal(signal.SIGTERM, stop)\n"
-            "(root / 'process.json').write_text(json.dumps({'pid': os.getpid(), 'session': os.getsid(0)}))\n"
+            "(root / 'process.json').write_text(json.dumps({'pid': "
+            "os.getpid(), 'session': os.getsid(0)}))\n"
             "with (root / 'argv.jsonl').open('a') as output:\n"
             "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "alive.touch()\n"
@@ -262,7 +269,9 @@ class FakeStationTest(unittest.TestCase):
             "from pathlib import Path\n"
             "root = Path(os.environ['STATION_TEST_ROOT'])\n"
             "output = Path(sys.argv[-1])\n"
-            "(root / 'uv-call.json').write_text(json.dumps({'argv': sys.argv[1:], 'directory_mode': stat.S_IMODE(output.parent.stat().st_mode)}))\n"
+            "(root / 'uv-call.json').write_text(json.dumps({'argv': "
+            "sys.argv[1:], 'directory_mode': "
+            "stat.S_IMODE(output.parent.stat().st_mode)}))\n"
             "if (root / 'uv-cancel').exists(): sys.exit(130)\n"
             "if (root / 'uv-fail').exists(): sys.exit(1)\n"
             "fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
@@ -276,6 +285,8 @@ class FakeStationTest(unittest.TestCase):
             self.environment.pop(name, None)
         self.environment.update(
             STATION_TEST_ROOT=str(self.root),
+            # uv run exports an absolute UV; keep every login inside the local fake.
+            UV=str(uv),
             PYTHONDONTWRITEBYTECODE="1",
             PATH=str(self.root) + os.pathsep + self.environment.get("PATH", os.defpath),
         )
@@ -288,16 +299,14 @@ class FakeStationTest(unittest.TestCase):
             deadline = time.monotonic() + 3
             while (self.root / "app/alive").exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
-            self.assertFalse(
-                (self.root / "app/alive").exists(), "test client did not stop"
-            )
+            self.assertFalse((self.root / "app/alive").exists(), "test client did not stop")
 
     def configure(self, values=None, source=None):
         text = "STATION_IP = 192.0.2.1\n"
         if source is not None:
             text += source
         elif values is not None:
-            for name, value in zip(SETTING_NAMES, values):
+            for name, value in zip(SETTING_NAMES, values, strict=False):
                 text += f"define {name}\n{value.replace('$', '$$')}\nendef\n"
         (self.root / "config.mk").write_text(text)
 
@@ -307,7 +316,7 @@ class FakeStationTest(unittest.TestCase):
         )
 
     def run_make(self, action, succeeds=True):
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607 # local test fixture or fixed tool argv
             [
                 "make",
                 "--no-print-directory",
@@ -322,6 +331,7 @@ class FakeStationTest(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
         if not succeeds:
             self.assertNotEqual(result.returncode, 0)
@@ -331,11 +341,7 @@ class FakeStationTest(unittest.TestCase):
 
     def launches(self):
         path = self.root / "argv.jsonl"
-        return (
-            [json.loads(line) for line in path.read_text().splitlines()]
-            if path.exists()
-            else []
-        )
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 class LaunchSettingsTest(FakeStationTest):
@@ -349,12 +355,10 @@ class LaunchSettingsTest(FakeStationTest):
         ):
             with self.subTest(name=name):
                 if name == "old":
-                    client.write_text(
-                        "#!/bin/sh\necho 'unsupported command' >&2\nexit 1\n"
-                    )
+                    client.write_text("#!/bin/sh\necho 'unsupported command' >&2\nexit 1\n")
                 elif name == "missing":
                     client.unlink()
-                result = subprocess.run(
+                result = subprocess.run(  # nosec B603 B607 # local test fixture or fixed tool argv
                     [
                         "make",
                         "--no-print-directory",
@@ -367,11 +371,10 @@ class LaunchSettingsTest(FakeStationTest):
                     capture_output=True,
                     text=True,
                     timeout=10,
+                    check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn(
-                    f"Saved token expiry (unverified): {expiry}\n", result.stdout
-                )
+                self.assertIn(f"Saved token expiry (unverified): {expiry}\n", result.stdout)
                 self.assertIn("Client stopped.", result.stdout)
                 self.assertNotIn("unsupported command", result.stdout + result.stderr)
         self.assertEqual(self.launches(), [])
@@ -392,13 +395,11 @@ class LaunchSettingsTest(FakeStationTest):
         ]
         for action in ("start", "restart"):
             exports = self.run_make(action)
-            self.assertEqual(exports, dict(zip(SETTING_NAMES, values)))
+            self.assertEqual(exports, dict(zip(SETTING_NAMES, values, strict=False)))
             self.assertEqual(self.launches()[-1], expected)
             identity = json.loads((self.root / "process.json").read_text())
             self.assertEqual(identity["session"], identity["pid"])
-            self.assertEqual(
-                int((self.root / "runtime/client.pid").read_text()), identity["pid"]
-            )
+            self.assertEqual(int((self.root / "runtime/client.pid").read_text()), identity["pid"])
             self.assertFalse(marker.exists(), "a setting executed as shell code")
         self.assertEqual(len(self.launches()), 2)
         self.run_make("start")
@@ -409,12 +410,7 @@ class LaunchSettingsTest(FakeStationTest):
         self.run_make("restart")
         self.assertEqual(
             self.launches()[-1],
-            [
-                "run",
-                "--voice=changed",
-                "--backend-model=",
-                "--backend-thinking-effort=disabled",
-            ],
+            ["run", "--voice=changed", "--backend-model=", "--backend-thinking-effort=disabled"],
         )
 
     def test_missing_empty_and_make_escaping(self):
@@ -433,7 +429,8 @@ class LaunchSettingsTest(FakeStationTest):
             )
 
         self.configure(
-            source="VOICE = $()  cash$$hash\\#  \nBACKEND_MODEL = -model\nBACKEND_THINKING_EFFORT = disabled\n"
+            source="VOICE = $()  cash$$hash\\#  \nBACKEND_MODEL = "
+            "-model\nBACKEND_THINKING_EFFORT = disabled\n"
         )
         self.run_make("restart")
         self.assertEqual(
@@ -462,7 +459,9 @@ class LaunchSettingsTest(FakeStationTest):
         )
         startup = self.root / "app/start.sh"
         self.assertEqual(startup.stat().st_mode & 0o777, 0o700)
-        subprocess.run(["sh", "-n", str(startup)], check=True)
+        # Parse only the startup script written in this test's temporary directory.
+        command = ["sh", "-n", str(startup)]
+        subprocess.run(command, check=True)  # nosec B603
         self.run_make("stop")
         self.assertTrue((self.root / "app/stopped").is_file())
         self.run_make("start")
@@ -504,7 +503,9 @@ class LaunchSettingsTest(FakeStationTest):
         for _ in range(2):
             self.run_make("enable-autostart")
             self.assertEqual((self.root / "hook").read_bytes(), station.BOOT_STUB)
-        self.assertEqual((self.root / "mounts").read_text().splitlines(), ["-o remount,rw /", "-o remount,ro /"])
+        self.assertEqual(
+            (self.root / "mounts").read_text().splitlines(), ["-o remount,rw /", "-o remount,ro /"]
+        )
         self.run_make("disable-autostart")
         self.assertFalse((self.root / "hook").exists())
         self.assertTrue((self.root / "app/alive").exists())
@@ -540,9 +541,7 @@ class LaunchSettingsTest(FakeStationTest):
             diagnostics = io.StringIO()
             with (
                 mock.patch.object(station.os, "environ", dict(os.environ, VOICE=value)),
-                mock.patch.object(
-                    sys, "argv", ["station.py", "--ip", "192.0.2.1", "start"]
-                ),
+                mock.patch.object(sys, "argv", ["station.py", "--ip", "192.0.2.1", "start"]),
                 mock.patch.object(station, "acquire") as acquire,
                 contextlib.redirect_stderr(diagnostics),
             ):
@@ -555,22 +554,39 @@ class LaunchSettingsTest(FakeStationTest):
 class LoginTest(FakeStationTest):
     def test_login_passes_chrome_literally_and_imports_on_the_station(self):
         marker = self.root / "MUST_NOT_RUN"
-        chrome = f"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome; touch {marker} `touch {marker}` $(touch {marker}) $HOME"
+        chrome = f"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome; touch {marker} `touch {marker}` $(touch {marker}) $HOME"  # noqa: E501
         self.configure(source=f"define CHROME\n{chrome.replace('$', '$$')}\nendef\n")
-        result = subprocess.run(
-            ["make", "--no-print-directory", f"PYTHON={sys.executable}", "ADB=fake-local-only", "login"],
+        result = subprocess.run(  # nosec B603 B607 # local test fixture or fixed tool argv
+            [
+                "make",
+                "--no-print-directory",
+                f"PYTHON={sys.executable}",
+                "ADB=fake-local-only",
+                "login",
+            ],
             cwd=self.root,
             env=self.environment,
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         call = json.loads((self.root / "uv-call.json").read_text())
         output = Path(call["argv"][-1])
         self.assertEqual(
             call["argv"],
-            ["run", "--script", str(SOURCE / "tools/browser_login.py"), "--chrome=" + chrome, str(output)],
+            [
+                "run",
+                "--locked",
+                "--no-dev",
+                "--project",
+                str(SOURCE),
+                "python",
+                str(SOURCE / "tools/browser_login.py"),
+                "--chrome=" + chrome,
+                str(output),
+            ],
         )
         self.assertEqual(call["directory_mode"], 0o700)
         self.assertFalse(output.parent.exists(), "local sign-in file survived")
@@ -601,13 +617,21 @@ class LoginTest(FakeStationTest):
         ):
             with self.subTest(flag=flag):
                 (self.root / flag).touch()
-                result = subprocess.run(
-                    [sys.executable, str(SOURCE / "tools/test_station.py"), "--fake-station", "--ip", "192.0.2.1", "login"],
+                result = subprocess.run(  # nosec B603 # local test fixture or fixed tool argv
+                    [
+                        sys.executable,
+                        str(SOURCE / "tools/test_station.py"),
+                        "--fake-station",
+                        "--ip",
+                        "192.0.2.1",
+                        "login",
+                    ],
                     cwd=self.root,
                     env=self.environment,
                     capture_output=True,
                     text=True,
                     timeout=15,
+                    check=False,
                 )
                 (self.root / flag).unlink()
                 self.assertEqual(result.returncode, code, result.stderr)
@@ -622,7 +646,8 @@ class LoginTest(FakeStationTest):
         result = self.run_make("login", succeeds=False)
         self.assertIn("Station command failed (1).", result.stderr)
         self.assertIn(
-            "Error: ChatGPT rejected the saved web session (HTTP 403); run make login on the computer",
+            "Error: ChatGPT rejected the saved web session (HTTP 403); run "
+            "make login on the computer",
             result.stderr,
         )
         self.assertNotIn("synthetic-golden", result.stdout + result.stderr)
@@ -632,13 +657,23 @@ class LoginTest(FakeStationTest):
         events = []
         with (
             mock.patch.object(sys, "argv", ["station.py", "--ip", "192.0.2.1", "login"]),
-            mock.patch.object(station, "login_preflight", side_effect=lambda args: events.append("preflight")),
             mock.patch.object(
-                station, "browser_sign_in", side_effect=lambda local: events.append("capture") or SIGN_IN
+                station, "login_preflight", side_effect=lambda _args: events.append("preflight")
             ),
-            mock.patch.object(station, "acquire", side_effect=lambda args, nonce: events.append("lock")),
-            mock.patch.object(station, "import_sign_in", side_effect=lambda *args: events.append("import")),
-            mock.patch.object(station, "release", side_effect=lambda *args: events.append("release")),
+            mock.patch.object(
+                station,
+                "browser_sign_in",
+                side_effect=lambda _local: events.append("capture") or SIGN_IN,
+            ),
+            mock.patch.object(
+                station, "acquire", side_effect=lambda _args, _nonce: events.append("lock")
+            ),
+            mock.patch.object(
+                station, "import_sign_in", side_effect=lambda *_args: events.append("import")
+            ),
+            mock.patch.object(
+                station, "release", side_effect=lambda *_args: events.append("release")
+            ),
         ):
             station.main()
         self.assertEqual(events, ["preflight", "capture", "lock", "import", "release"])
@@ -652,10 +687,12 @@ class LoginTest(FakeStationTest):
                 mock.patch.object(station, "adb_run") as run,
                 mock.patch.object(station, "adb_read", return_value=b"altered") as read,
                 mock.patch.object(station, "adb_shell") as shell,
+                self.assertRaisesRegex(RuntimeError, "Uploaded sign-in differs"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "Uploaded sign-in differs"):
-                    station.import_sign_in(args, "owner", "/data/synthetic-stage", local, SIGN_IN)
-            run.assert_called_once_with(args, "push", str(local), "/data/synthetic-stage", quiet=True)
+                station.import_sign_in(args, "owner", "/data/synthetic-stage", local, SIGN_IN)
+            run.assert_called_once_with(
+                args, "push", str(local), "/data/synthetic-stage", quiet=True
+            )
             read.assert_called_once_with(args, "/data/synthetic-stage", quiet=True)
             shell.assert_not_called()
 
@@ -690,15 +727,19 @@ class UncertainCleanupTest(unittest.TestCase):
             "confirmed error",
         ):
             with self.subTest(failure=failure):
-                args = SimpleNamespace(
-                    adb="fake-adb", serial="synthetic", uncertain=False
-                )
+                args = SimpleNamespace(adb="fake-adb", serial="synthetic", uncertain=False)
                 calls, local_scripts = [], []
 
-                def fake_run(command, **kwargs):
-                    self.assertFalse(
-                        args.uncertain, "another ADB command ran after uncertainty"
-                    )
+                def fake_run(
+                    command,
+                    *,
+                    args=args,
+                    calls=calls,
+                    local_scripts=local_scripts,
+                    failure=failure,
+                    **_kwargs,
+                ):
+                    self.assertFalse(args.uncertain, "another ADB command ran after uncertainty")
                     calls.append(command[3:])
                     if command[3] == "push":
                         local_scripts.append(Path(command[4]))
@@ -713,17 +754,16 @@ class UncertainCleanupTest(unittest.TestCase):
                     output = b""
                     if command[3] == "shell":
                         script = command[4]
-                        marker = station.re.search(
-                            r"__VOICE_STATUS_[0-9a-f]+__", script
-                        )[0]
+                        match = station.re.search(r"__VOICE_STATUS_[0-9a-f]+__", script)
+                        if match is None:
+                            raise AssertionError("Missing completion marker")
+                        marker = match[0]
                         content, code = b"", 0
                         if "mktemp" in script:
                             content = b"/tmp/voice-script-synthetic\n"
                         elif "sh /tmp/voice-script-synthetic" in script:
                             if failure == "missing frame":
-                                return SimpleNamespace(
-                                    returncode=0, stdout=b"", stderr=b""
-                                )
+                                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
                             if failure == "malformed frame":
                                 return SimpleNamespace(
                                     returncode=0,
@@ -734,42 +774,31 @@ class UncertainCleanupTest(unittest.TestCase):
                                 raise KeyboardInterrupt
                             if failure == "confirmed error":
                                 code = 7
-                        output = (
-                            content
-                            + b"\n"
-                            + marker.encode()
-                            + str(code).encode()
-                            + b"\n"
-                        )
+                        output = content + b"\n" + marker.encode() + str(code).encode() + b"\n"
                     return SimpleNamespace(returncode=0, stdout=output, stderr=b"")
 
                 diagnostics = io.StringIO()
                 with (
                     mock.patch.object(station.subprocess, "run", side_effect=fake_run),
                     contextlib.redirect_stderr(diagnostics),
-                ):
-                    with self.assertRaises(
+                    self.assertRaises(
                         KeyboardInterrupt if failure == "interrupt" else RuntimeError
-                    ) as rejected:
-                        station.adb_shell(args, "true\n")
+                    ) as rejected,
+                ):
+                    station.adb_shell(args, "true\n")
                 self.assertTrue(local_scripts)
                 self.assertTrue(all(not path.exists() for path in local_scripts))
                 cleanup = [
                     call
                     for call in calls
-                    if call[0] == "shell"
-                    and "rm -f /tmp/voice-script-synthetic" in call[1]
+                    if call[0] == "shell" and "rm -f /tmp/voice-script-synthetic" in call[1]
                 ]
                 self.assertEqual(len(cleanup), int(failure == "confirmed error"))
                 self.assertEqual(args.uncertain, failure != "confirmed error")
                 if failure == "confirmed error":
-                    self.assertEqual(
-                        str(rejected.exception), "Station command failed (7)."
-                    )
+                    self.assertEqual(str(rejected.exception), "Station command failed (7).")
                 else:
-                    self.assertIn(
-                        "temporary remote files are retained", diagnostics.getvalue()
-                    )
+                    self.assertIn("temporary remote files are retained", diagnostics.getvalue())
 
     def test_uncertain_release_retains_stage_and_lock(self):
         for stage in (None, "/data/synthetic-private-stage"):
@@ -778,32 +807,23 @@ class UncertainCleanupTest(unittest.TestCase):
                 mock.patch.object(station, "adb_shell") as remote,
                 contextlib.redirect_stderr(diagnostics),
             ):
-                station.release(
-                    SimpleNamespace(uncertain=True), "synthetic-owner", stage
-                )
+                station.release(SimpleNamespace(uncertain=True), "synthetic-owner", stage)
                 remote.assert_not_called()
             self.assertIn("retained if present", diagnostics.getvalue())
             self.assertNotIn("private", diagnostics.getvalue())
         with mock.patch.object(station, "adb_shell") as remote:
             station.release(
-                SimpleNamespace(uncertain=False),
-                "synthetic-owner",
-                "/data/synthetic-stage",
+                SimpleNamespace(uncertain=False), "synthetic-owner", "/data/synthetic-stage"
             )
             self.assertIn("rm -f /data/synthetic-stage", remote.call_args.args[1])
             self.assertIn('rmdir "$lock"', remote.call_args.args[1])
 
     def test_cleanup_does_not_replace_original_operation_failure(self):
         original = RuntimeError("synthetic original failure")
-        for cleanup_error in (
-            RuntimeError("synthetic cleanup failure"),
-            KeyboardInterrupt(),
-        ):
+        for cleanup_error in (RuntimeError("synthetic cleanup failure"), KeyboardInterrupt()):
             with (
                 self.subTest(cleanup=type(cleanup_error)),
-                mock.patch.object(
-                    sys, "argv", ["station.py", "--ip", "192.0.2.1", "stop"]
-                ),
+                mock.patch.object(sys, "argv", ["station.py", "--ip", "192.0.2.1", "stop"]),
                 mock.patch.object(station, "acquire"),
                 mock.patch.object(station, "adb_shell", side_effect=original),
                 mock.patch.object(station, "release", side_effect=cleanup_error),

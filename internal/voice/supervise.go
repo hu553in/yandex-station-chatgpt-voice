@@ -19,6 +19,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const recoveryRetries = 2
+const recoveryPause = 5 * time.Second
+const childWaitTimeout = 10 * time.Second
+const nativeReadyTimeout = 60 * time.Second
+
 const logFileBytes = 512 << 10
 const exitConfig = 78
 
@@ -27,6 +32,7 @@ type configError struct{ error }
 func (e configError) Unwrap() error { return e.error }
 
 func ExitCode(err error) int {
+	//nolint:errorlint // Only the exact sentinel is benign; wrapped or joined failures must remain failures.
 	if err == nil || err == context.Canceled {
 		return 0
 	}
@@ -44,7 +50,7 @@ type supervisor struct {
 }
 
 func (s supervisor) run(ctx context.Context) error {
-	for attempt := range 3 {
+	for attempt := range recoveryRetries + 1 {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
@@ -65,14 +71,22 @@ func (s supervisor) run(ctx context.Context) error {
 			return nil
 		}
 		if code == exitConfig {
-			return configError{errors.New("Station client rejected its saved session; inspect the log and run make login on the computer")}
+			return configError{
+				//nolint:staticcheck // Station and Opus are proper names in established user-visible diagnostics.
+				errors.New(
+					"Station client rejected its saved session; inspect the log and run make login on the computer",
+				),
+			}
 		}
-		if attempt == 2 {
-			return errors.New("Station client stopped after two recovery attempts; inspect the log and run make restart")
+		if attempt == recoveryRetries {
+			//nolint:staticcheck // Station and Opus are proper names in established user-visible diagnostics.
+			return errors.New(
+				"Station client stopped after two recovery attempts; inspect the log and run make restart",
+			)
 		}
 		s.report.Printf("Client worker exited with code %d; recovery attempt %d of 2 in 5 seconds.", code, attempt+1)
-		if err := s.pause(ctx); err != nil {
-			return err
+		if pauseErr := s.pause(ctx); pauseErr != nil {
+			return pauseErr
 		}
 	}
 	return nil
@@ -108,7 +122,7 @@ func supervise(ctx context.Context, args []string, path string) error {
 			select {
 			case <-ctx.Done():
 				return context.Cause(ctx)
-			case <-time.After(5 * time.Second):
+			case <-time.After(recoveryPause):
 				return nil
 			}
 		},
@@ -120,6 +134,7 @@ func supervise(ctx context.Context, args []string, path string) error {
 	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 		err = context.Canceled
 	}
+	//nolint:errorlint // Only the exact sentinel is benign; wrapped or joined failures must remain failures.
 	if err != nil && err != context.Canceled {
 		report.Print("Supervisor stopped: ", err)
 	}
@@ -127,14 +142,14 @@ func supervise(ctx context.Context, args []string, path string) error {
 }
 
 func supervisorLock(dir string) (*os.File, error) {
-	if err := os.Mkdir(dir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Mkdir(dir, privateDirectoryMode); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, errors.New("cannot create supervisor runtime directory")
 	}
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		return nil, errors.New("supervisor runtime must be a private directory")
 	}
-	if info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+	if !ownedByClient(info) {
 		return nil, errors.New("supervisor runtime has another owner")
 	}
 	f, err := openLockFile(filepath.Join(dir, "supervisor.lock"), "supervisor lock")
@@ -142,37 +157,46 @@ func supervisorLock(dir string) (*os.File, error) {
 		return nil, err
 	}
 	if unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, errors.New("another client instance is still running")
 	}
 	return f, nil
 }
 
 func openLockFile(path, label string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0600)
+	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, privateFileMode)
 	if err != nil {
 		return nil, errors.New("cannot open " + label)
 	}
 	f := os.NewFile(uintptr(fd), filepath.Base(path))
-	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		f.Close()
+	if info, statErr := f.Stat(); statErr != nil || !info.Mode().IsRegular() ||
+		!ownedByClient(info) {
+		_ = f.Close()
 		return nil, errors.New(label + " must be a regular file")
 	}
 	return f, nil
 }
 
-func runChild(ctx context.Context, executable string, args []string, lock *os.File, output io.Writer, report *log.Logger) (int, error) {
+func runChild(
+	ctx context.Context,
+	executable string,
+	args []string,
+	lock *os.File,
+	output io.Writer,
+	report *log.Logger,
+) (int, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if ctx.Err() != nil {
 		return 0, context.Cause(ctx)
 	}
+	//nolint:gosec // The supervisor supplies os.Executable; no shell expands worker arguments.
 	cmd := exec.CommandContext(ctx, executable, args...)
 	configureChild(cmd)
 	cmd.ExtraFiles = []*os.File{lock}
 	cmd.Stdout, cmd.Stderr = output, output
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = 10 * time.Second
+	cmd.WaitDelay = childWaitTimeout
 	if err := cmd.Start(); err != nil {
 		return 0, errors.New("cannot start Station client worker")
 	}
@@ -190,7 +214,7 @@ func runChild(ctx context.Context, executable string, args []string, lock *os.Fi
 }
 
 func waitNativeState(parent context.Context) error {
-	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, nativeReadyTimeout)
 	defer cancel()
 	for {
 		conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", "127.0.0.1:9875")
@@ -230,12 +254,12 @@ func openCappedLog(path string, limit int64) (*cappedLog, error) {
 		}
 	}
 	if _, err := os.Lstat(path + ".1"); err == nil {
-		previous, _, err := openLogSegment(path+".1", limit)
-		if err != nil {
-			return nil, err
+		previous, _, openLogSegmentErr := openLogSegment(path+".1", limit)
+		if openLogSegmentErr != nil {
+			return nil, openLogSegmentErr
 		}
-		if err := previous.Close(); err != nil {
-			return nil, err
+		if closeErr := previous.Close(); closeErr != nil {
+			return nil, closeErr
 		}
 	}
 	f, size, err := openLogSegment(path, limit)
@@ -245,38 +269,52 @@ func openCappedLog(path string, limit int64) (*cappedLog, error) {
 	return &cappedLog{path: path, max: limit, f: f, size: size}, nil
 }
 
+func singleLink(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Nlink == 1
+}
+
 func openLogSegment(path string, limit int64) (*os.File, int64, error) {
-	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0600)
+	fd, err := unix.Open(
+		path,
+		unix.O_CREAT|unix.O_RDWR|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK,
+		privateFileMode,
+	)
 	if err != nil {
 		return nil, 0, errors.New("cannot open bounded client log")
 	}
 	f := os.NewFile(uintptr(fd), path)
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) || info.Sys().(*syscall.Stat_t).Nlink != 1 || f.Chmod(0600) != nil {
-		f.Close()
+	if err != nil || !info.Mode().IsRegular() || !ownedByClient(info) ||
+		!singleLink(info) ||
+		f.Chmod(privateFileMode) != nil {
+		_ = f.Close()
 		return nil, 0, errors.New("cannot protect bounded client log")
 	}
 	if info.Size() > limit {
 		tail := make([]byte, int(limit))
 		_, readErr := f.ReadAt(tail, info.Size()-limit)
 		if readErr != nil || f.Truncate(0) != nil {
-			f.Close()
+			_ = f.Close()
 			return nil, 0, errors.New("cannot bound existing client log")
 		}
-		if _, err := f.Write(tail); err != nil {
-			f.Close()
+		if _, writeErr := f.Write(tail); writeErr != nil {
+			_ = f.Close()
 			return nil, 0, errors.New("cannot retain recent client log")
 		}
 	}
 	return f, min(info.Size(), limit), nil
 }
 
-func (l *cappedLog) Write(p []byte) (n int, err error) {
+func (l *cappedLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	n = len(p)
+	n := len(p)
 	if l.discarded {
-		prefix := time.Now().UTC().Format("2006/01/02 15:04:05") + " Client log output was discarded while storage was unavailable.\n"
+		prefix := time.Now().
+			UTC().
+			Format("2006/01/02 15:04:05") +
+			" Client log output was discarded while storage was unavailable.\n"
 		p = append([]byte(prefix), p...)
 	}
 	l.discarded = l.write(p) != nil
@@ -291,23 +329,23 @@ func (l *cappedLog) rotate() error {
 	published := false
 	defer func() {
 		if !published {
-			next.Close()
-			os.Remove(next.Name())
+			_ = next.Close()
+			_ = os.Remove(next.Name())
 		}
 	}()
 	if !l.moved {
-		if err := os.Rename(l.path, l.path+".1"); err != nil {
-			return err
+		if renameErr := os.Rename(l.path, l.path+".1"); renameErr != nil {
+			return renameErr
 		}
 		l.moved = true
 	}
-	if err := os.Rename(next.Name(), l.path); err != nil {
-		return err
+	if publishErr := os.Rename(next.Name(), l.path); publishErr != nil {
+		return publishErr
 	}
 	previous := l.f
 	l.f, l.size, l.moved = next, 0, false
 	published = true
-	previous.Close()
+	_ = previous.Close()
 	return nil
 }
 

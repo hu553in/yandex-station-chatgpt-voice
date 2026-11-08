@@ -4,4 +4,4 @@ package voice
 
 import "os/exec"
 
-func configureChild(cmd *exec.Cmd) {}
+func configureChild(_ *exec.Cmd) {}

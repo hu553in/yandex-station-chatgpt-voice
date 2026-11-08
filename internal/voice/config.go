@@ -17,12 +17,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const privateDirectoryMode = 0700
+const privateFileMode = 0600
+const lockRetryInterval = 50 * time.Millisecond
+const jwtParts = 3
+
 const maxCredentialBytes = 1 << 20
 const sessionCookieName = "__Secure-next-auth.session-token"
 const maxSessionCookies = 16
 const maxCookieValueBytes = 4096
 const maxTokenExpiry = 253402300799
 
+//nolint:gochecknoglobals // Persistence tests inject cleanup failure after a failed atomic rename.
 var removeCredentialTemp = os.Remove
 
 var errNoSession = errors.New("no saved ChatGPT session; run make login on the computer")
@@ -40,6 +46,7 @@ type sessionCookie struct {
 
 type webSession struct {
 	credential
+
 	Cookies []sessionCookie `json:"cookies"`
 }
 
@@ -64,7 +71,7 @@ func validDeviceID(id string) bool {
 		return false
 	}
 	for _, r := range id {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' {
 			return false
 		}
 	}
@@ -99,18 +106,23 @@ func validFamily(cookies []sessionCookie) bool {
 	return true
 }
 
+func ownedByClient(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int64(stat.Uid) == int64(os.Geteuid())
+}
+
 func privateDir(dir string) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, privateDirectoryMode); err != nil {
 		return errors.New("cannot create private credential directory")
 	}
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {
 		return errors.New("credential directory must be a real directory")
 	}
-	if info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+	if !ownedByClient(info) {
 		return errors.New("credential directory has another owner")
 	}
-	if os.Chmod(dir, 0700) != nil {
+	if os.Chmod(dir, privateDirectoryMode) != nil {
 		return errors.New("cannot protect credential directory")
 	}
 	return nil
@@ -127,7 +139,7 @@ func readPrivateFile(path string) ([]byte, error) {
 	f := os.NewFile(uintptr(fd), filepath.Base(path))
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+	if err != nil || !info.Mode().IsRegular() || !ownedByClient(info) {
 		return nil, errors.New("session file must be a regular file owned by the client user")
 	}
 	if info.Mode().Perm()&0077 != 0 {
@@ -178,11 +190,14 @@ func writeSessionFile(path string, s webSession) (result error) {
 		return errors.New("cannot create private credential file")
 	}
 	defer func() {
-		if err := removeCredentialTemp(f.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if removeCredentialTempErr := removeCredentialTemp(
+			f.Name(),
+		); removeCredentialTempErr != nil &&
+			!errors.Is(removeCredentialTempErr, os.ErrNotExist) {
 			result = errors.Join(result, errors.New("cannot remove temporary credential file"))
 		}
 	}()
-	if err = f.Chmod(0600); err == nil {
+	if err = f.Chmod(privateFileMode); err == nil {
 		_, err = f.Write(data)
 	}
 	if err == nil {
@@ -195,6 +210,7 @@ func writeSessionFile(path string, s webSession) (result error) {
 	if os.Rename(f.Name(), path) != nil {
 		return errors.New("cannot replace private credential file")
 	}
+	//nolint:gosec // The parent directory was created and verified private before the atomic save.
 	d, err := os.Open(dir)
 	if err == nil {
 		err = errors.Join(d.Sync(), d.Close())
@@ -205,30 +221,30 @@ func writeSessionFile(path string, s webSession) (result error) {
 	return nil
 }
 
-func lockSession(ctx context.Context, path string) (unlock func(), err error) {
+func lockSession(ctx context.Context, path string) (func(), error) {
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, cause
 	}
 	dir := filepath.Dir(path)
-	if err := privateDir(dir); err != nil {
-		return nil, err
+	if privateDirErr := privateDir(dir); privateDirErr != nil {
+		return nil, privateDirErr
 	}
 	f, err := openLockFile(filepath.Join(dir, "session.lock"), "session lock")
 	if err != nil {
 		return nil, err
 	}
-	retry := time.Tick(50 * time.Millisecond)
+	retry := time.Tick(lockRetryInterval)
 	for {
 		if cause := context.Cause(ctx); cause != nil {
-			f.Close()
+			_ = f.Close()
 			return nil, cause
 		}
-		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return func() { f.Close() }, nil
+		flockErr := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if flockErr == nil {
+			return func() { _ = f.Close() }, nil
 		}
-		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
-			f.Close()
+		if !errors.Is(flockErr, unix.EWOULDBLOCK) && !errors.Is(flockErr, unix.EINTR) {
+			_ = f.Close()
 			return nil, errors.New("cannot lock saved session")
 		}
 		select {
@@ -240,7 +256,7 @@ func lockSession(ctx context.Context, path string) (unlock func(), err error) {
 
 func tokenExpiry(token string) (time.Time, bool) {
 	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
+	if len(parts) != jwtParts {
 		return time.Time{}, false
 	}
 	data, err := base64.RawURLEncoding.DecodeString(parts[1])
@@ -248,7 +264,8 @@ func tokenExpiry(token string) (time.Time, bool) {
 	var claims struct {
 		Expires *int64 `json:"exp"`
 	}
-	if err != nil || json.Unmarshal(data, &claims) != nil || claims.Expires == nil || *claims.Expires < 0 || *claims.Expires > maxTokenExpiry {
+	if err != nil || json.Unmarshal(data, &claims) != nil || claims.Expires == nil || *claims.Expires < 0 ||
+		*claims.Expires > maxTokenExpiry {
 		return time.Time{}, false
 	}
 	return time.Unix(*claims.Expires, 0).UTC(), true
@@ -259,7 +276,7 @@ func writeAuthStatus(path string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	expiry := "unknown"
+	expiry := unknownValue
 	if expires, ok := tokenExpiry(s.AccessToken); ok {
 		expiry = expires.Format(time.RFC3339)
 		if !time.Now().Before(expires) {

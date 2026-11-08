@@ -18,6 +18,7 @@ import (
 )
 
 func toneFrame(epoch uint64, frame int, hz float64) captureFrame {
+	//nolint:gosec // Fixture indices and payload lengths are bounded by the literal test cases.
 	f := captureFrame{epoch: epoch, sequence: uint64(frame)}
 	for i := range f.pcm {
 		f.pcm[i] = int16(12000 * math.Sin(2*math.Pi*hz*float64(frame*captureSamples+i)/16000))
@@ -28,6 +29,7 @@ func toneFrame(epoch uint64, frame int, hz float64) captureFrame {
 func tonePower(pcm []byte, hz float64) float64 {
 	var sine, cosine float64
 	for i := range len(pcm) / 4 {
+		//nolint:gosec // PCM uses the same 16 bits for signed samples and little-endian words.
 		sample := float64(int16(binary.LittleEndian.Uint16(pcm[i*4:])))
 		angle := 2 * math.Pi * hz * float64(i) / 48000
 		sine += sample * math.Sin(angle)
@@ -39,6 +41,7 @@ func tonePower(pcm []byte, hz float64) float64 {
 func goodTone(pcm []byte, want, other float64) bool {
 	var energy float64
 	for i := 0; i < len(pcm); i += 2 {
+		//nolint:gosec // PCM uses the same 16 bits for signed samples and little-endian words.
 		v := float64(int16(binary.LittleEndian.Uint16(pcm[i:])))
 		energy += v * v
 	}
@@ -56,6 +59,7 @@ func allZero(data []byte) bool {
 
 type paddingOpusPayloader struct {
 	codecs.OpusPayloader
+
 	frames  int
 	padding func()
 }
@@ -94,7 +98,9 @@ func TestPlaybackBoundsAndRevocation(t *testing.T) {
 		t.Fatal("revoked current or queued PCM escaped")
 	}
 	for _, state := range []string{"idle", "listening", "speaking", "responding"} {
-		if _, err := decodeEvent(testEnvelope(t, `{"type":"state_update","payload":{"new_state":"`+state+`"}}`)); err != nil {
+		if _, err := decodeEvent(
+			testEnvelope(t, `{"type":"state_update","payload":{"new_state":"`+state+`"}}`),
+		); err != nil {
 			t.Fatal(err)
 		}
 		a.callback(output, nil, 480)
@@ -131,6 +137,7 @@ func TestCuePCMHasDistinctFadedTones(t *testing.T) {
 				if i%2 == 1 && sample != pcm[i-1] {
 					t.Fatal("cue stereo channels differ")
 				}
+				//nolint:gosec // PCM uses the same 16 bits for signed samples and little-endian words.
 				binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
 			}
 			if !goodTone(data, tc.frequency, tc.other) || !allZero(data[:4]) || !allZero(data[len(data)-4:]) {
@@ -151,21 +158,26 @@ func TestCanceledCompletionDoesNotStartPlayback(t *testing.T) {
 func TestProductionAudioOverLocalPion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
 	defer cancel()
-	a, b := localPeer(t, ctx), localPeer(t, ctx)
+	a, b := localPeer(ctx, t), localPeer(ctx, t)
 	paddingSent := make(chan error, 2)
 	for _, p := range []*peer{a, b} {
-		track, err := webrtc.NewTrackLocalStaticSample(p.mic.Codec(), p.mic.ID(), p.mic.StreamID(), webrtc.WithPayloader(func(webrtc.RTPCodecCapability) (rtp.Payloader, error) {
-			return &paddingOpusPayloader{padding: func() { paddingSent <- p.mic.GeneratePadding(1) }}, nil
-		}))
+		track, err := webrtc.NewTrackLocalStaticSample(
+			p.mic.Codec(),
+			p.mic.ID(),
+			p.mic.StreamID(),
+			webrtc.WithPayloader(func(webrtc.RTPCodecCapability) (rtp.Payloader, error) {
+				return &paddingOpusPayloader{padding: func() { paddingSent <- p.mic.GeneratePadding(1) }}, nil
+			}),
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := p.pc.GetSenders()[0].ReplaceTrack(track); err != nil {
-			t.Fatal(err)
+		if replaceTrackErr := p.pc.GetSenders()[0].ReplaceTrack(track); replaceTrackErr != nil {
+			t.Fatal(replaceTrackErr)
 		}
 		p.mic = track
 	}
-	connectLocalPeers(t, ctx, a, b)
+	connectLocalPeers(ctx, t, a, b)
 	epochA, epochB := newStationEpoch(ctx, 1), newStationEpoch(ctx, 2)
 	audioA, audioB := epochA.output, epochB.output
 	inputA, inputB := make(chan captureFrame, 150), make(chan captureFrame, 150)
@@ -258,14 +270,18 @@ func TestProductionAudioOverLocalPion(t *testing.T) {
 		t.Fatal(err)
 	}
 	workers.Wait()
-	t.Logf("16k mono Opus to 48k stereo playback through local SRTP, A %d tone frames, B %d tone frames; padding and irreversible native priority passed", goodA, goodB)
+	t.Logf(
+		"16k mono Opus to 48k stereo playback through local SRTP, A %d tone frames, B %d tone frames; padding and irreversible native priority passed",
+		goodA,
+		goodB,
+	)
 }
 
 func TestRemoteDecoderReplacedOnTimestampDiscontinuity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	a, b := localPeer(t, ctx), localPeer(t, ctx)
-	connectLocalPeers(t, ctx, a, b)
+	a, b := localPeer(ctx, t), localPeer(ctx, t)
+	connectLocalPeers(ctx, t, a, b)
 	e := newStationEpoch(ctx, 1)
 	defer e.revoke(context.Canceled)
 	done := make(chan error, 1)
@@ -285,16 +301,18 @@ func TestRemoteDecoderReplacedOnTimestampDiscontinuity(t *testing.T) {
 	for i := range 3 {
 		f := toneFrame(1, i, 440)
 		var packet [4000]byte
-		n, err := encoder.Encode(f.pcm[:], packet[:])
-		if err != nil {
-			t.Fatal(err)
+		n, encodeErr := encoder.Encode(f.pcm[:], packet[:])
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
 		}
 		duration := frameDuration
 		if i == 0 {
 			duration = 200 * time.Millisecond
 		}
-		if err := b.mic.WriteSample(media.Sample{Data: packet[:n], Duration: duration}); err != nil {
-			t.Fatal(err)
+		if writeSampleErr := b.mic.WriteSample(
+			media.Sample{Data: packet[:n], Duration: duration},
+		); writeSampleErr != nil {
+			t.Fatal(writeSampleErr)
 		}
 	}
 	deadline := time.NewTimer(time.Second)
@@ -303,9 +321,9 @@ func TestRemoteDecoderReplacedOnTimestampDiscontinuity(t *testing.T) {
 	defer tick.Stop()
 	for len(e.output.playback) < 3 {
 		select {
-		case err := <-done:
-			done <- err
-			t.Fatalf("decoder did not survive timestamp gap: %v", err)
+		case operationErr := <-done:
+			done <- operationErr
+			t.Fatalf("decoder did not survive timestamp gap: %v", operationErr)
 		case <-deadline.C:
 			t.Fatal("decoded audio after gap missing")
 		case <-tick.C:
@@ -316,8 +334,8 @@ func TestRemoteDecoderReplacedOnTimestampDiscontinuity(t *testing.T) {
 func TestCaptureUses48kRTPClockAndStopsOnRevocation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	a, b := localPeer(t, ctx), localPeer(t, ctx)
-	connectLocalPeers(t, ctx, a, b)
+	a, b := localPeer(ctx, t), localPeer(ctx, t)
+	connectLocalPeers(ctx, t, a, b)
 	e := newStationEpoch(ctx, 11)
 	defer e.revoke(context.Canceled)
 	input := make(chan captureFrame, 20)
@@ -349,9 +367,9 @@ func TestCaptureUses48kRTPClockAndStopsOnRevocation(t *testing.T) {
 	}
 	e.revoke(errAlicePriority)
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
+	case operationErr := <-done:
+		if operationErr != nil {
+			t.Fatal(operationErr)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("revoked microphone sender did not finish")
@@ -375,15 +393,15 @@ func TestRemoteAudioReorderingAndLoss(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			a, b := localPeer(t, ctx), localPeer(t, ctx)
+			a, b := localPeer(ctx, t), localPeer(ctx, t)
 			raw, err := webrtc.NewTrackLocalStaticRTP(b.mic.Codec(), b.mic.ID(), b.mic.StreamID())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := b.pc.GetSenders()[0].ReplaceTrack(raw); err != nil {
-				t.Fatal(err)
+			if replaceTrackErr := b.pc.GetSenders()[0].ReplaceTrack(raw); replaceTrackErr != nil {
+				t.Fatal(replaceTrackErr)
 			}
-			connectLocalPeers(t, ctx, a, b)
+			connectLocalPeers(ctx, t, a, b)
 			e := newStationEpoch(ctx, 1)
 			var paddingWorker sync.WaitGroup
 			done := make(chan error, 1)
@@ -411,15 +429,24 @@ func TestRemoteAudioReorderingAndLoss(t *testing.T) {
 			for i := range packets {
 				frame := toneFrame(1, i, 440+float64(i)*220)
 				buf := make([]byte, 4000)
-				n, err := encoder.Encode(frame.pcm[:], buf)
-				if err != nil {
-					t.Fatal(err)
+				n, encodeErr := encoder.Encode(frame.pcm[:], buf)
+				if encodeErr != nil {
+					t.Fatal(encodeErr)
 				}
 				packets[i] = buf[:n]
 			}
 			for _, i := range tc.arrival {
-				if err := raw.WriteRTP(&rtp.Packet{Version: 2, SequenceNumber: tc.start + uint16(i), Timestamp: 1000 + uint32(i)*960, Payload: packets[i]}); err != nil {
-					t.Fatal(err)
+				if writeRTPErr := raw.WriteRTP(
+					&rtp.Packet{
+						Version: 2,
+						//nolint:gosec // Fixture indices and payload lengths are bounded by the literal test cases.
+						SequenceNumber: tc.start + uint16(i),
+						//nolint:gosec // Fixture indices and payload lengths are bounded by the literal test cases.
+						Timestamp: 1000 + uint32(i)*960,
+						Payload:   packets[i],
+					},
+				); writeRTPErr != nil {
+					t.Fatal(writeRTPErr)
 				}
 			}
 			if tc.padding {
@@ -432,9 +459,17 @@ func TestRemoteAudioReorderingAndLoss(t *testing.T) {
 							return
 						case <-tick.C:
 						}
-						if err := raw.WriteRTP(&rtp.Packet{Version: 2, SequenceNumber: sequence, Timestamp: 1960, Padding: true, PaddingSize: 1}); err != nil {
+						if innerWriteRTPErr := raw.WriteRTP(
+							&rtp.Packet{
+								Version:        2,
+								SequenceNumber: sequence,
+								Timestamp:      1960,
+								Padding:        true,
+								PaddingSize:    1,
+							},
+						); innerWriteRTPErr != nil {
 							if ctx.Err() == nil {
-								t.Error(err)
+								t.Error(innerWriteRTPErr)
 							}
 							return
 						}
@@ -463,9 +498,9 @@ func TestRemoteAudioReorderingAndLoss(t *testing.T) {
 					if got.used != n || !slices.Equal(got.pcm[:n*2], pcm[:n*2]) {
 						t.Fatal("RTP order or loss concealment corrupted decoded speech")
 					}
-				case err := <-done:
-					done <- err
-					t.Fatal("remote receiver ended", err)
+				case operationErr := <-done:
+					done <- operationErr
+					t.Fatal("remote receiver ended", operationErr)
 				case <-ctx.Done():
 					t.Fatal("reorder window did not release the audio tail")
 				case <-deadline.C:
@@ -488,15 +523,15 @@ func TestRemoteAudioAfterLongPadding(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
-			a, b := localPeer(t, ctx), localPeer(t, ctx)
+			a, b := localPeer(ctx, t), localPeer(ctx, t)
 			raw, err := webrtc.NewTrackLocalStaticRTP(b.mic.Codec(), b.mic.ID(), b.mic.StreamID())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := b.pc.GetSenders()[0].ReplaceTrack(raw); err != nil {
-				t.Fatal(err)
+			if replaceTrackErr := b.pc.GetSenders()[0].ReplaceTrack(raw); replaceTrackErr != nil {
+				t.Fatal(replaceTrackErr)
 			}
-			connectLocalPeers(t, ctx, a, b)
+			connectLocalPeers(ctx, t, a, b)
 			e := newStationEpoch(ctx, 1)
 			done := make(chan error, 1)
 			go func() {
@@ -520,9 +555,9 @@ func TestRemoteAudioAfterLongPadding(t *testing.T) {
 			for i := range packets {
 				frame := toneFrame(1, i, 440+float64(i)*220)
 				buf := make([]byte, 4000)
-				n, err := encoder.Encode(frame.pcm[:], buf)
-				if err != nil {
-					t.Fatal(err)
+				n, encodeErr := encoder.Encode(frame.pcm[:], buf)
+				if encodeErr != nil {
+					t.Fatal(encodeErr)
 				}
 				packets[i] = buf[:n]
 			}
@@ -532,8 +567,8 @@ func TestRemoteAudioAfterLongPadding(t *testing.T) {
 				if payload == nil {
 					packet.Padding, packet.PaddingSize = true, 1
 				}
-				if err := raw.WriteRTP(packet); err != nil {
-					t.Fatal(err)
+				if writeRTPErr := raw.WriteRTP(packet); writeRTPErr != nil {
+					t.Fatal(writeRTPErr)
 				}
 			}
 			read := func(i int) {
@@ -552,9 +587,9 @@ func TestRemoteAudioAfterLongPadding(t *testing.T) {
 					if got.used != samplesPerFrame || !slices.Equal(got.pcm[:], pcm) {
 						t.Fatal("padding changed Opus history, RTP order, or loss concealment")
 					}
-				case err := <-done:
-					done <- err
-					t.Fatal("receiver ended", err)
+				case operationErr := <-done:
+					done <- operationErr
+					t.Fatal("receiver ended", operationErr)
 				case <-time.After(time.Second):
 					t.Fatal("valid speech after padding was not decoded")
 				}
@@ -573,6 +608,7 @@ func TestRemoteAudioAfterLongPadding(t *testing.T) {
 				sequence++
 				timestamp += samplesPerFrame
 				for _, i := range []int{0, 2, 1, 1, 4} {
+					//nolint:gosec // Fixture indices and payload lengths are bounded by the literal test cases.
 					write(sequence+uint16(i), timestamp+uint32(i)*samplesPerFrame, packets[i])
 				}
 				for _, i := range []int{0, 1, 2, -1, 4} {
@@ -583,23 +619,25 @@ func TestRemoteAudioAfterLongPadding(t *testing.T) {
 				select {
 				case <-e.output.playback:
 					t.Fatal("late or duplicate media was played after the reorder deadline")
-				case err := <-done:
-					done <- err
-					t.Fatal("receiver ended", err)
+				case completionErr := <-done:
+					done <- completionErr
+					t.Fatal("receiver ended", completionErr)
 				case <-time.After(2 * reorderDelay):
 				}
 				sequence += 4
 				timestamp += 4 * samplesPerFrame
 				t.Logf("speech and decoder history preserved after %d padding packets", padding)
 			}
-			if err := raw.WriteRTP(&rtp.Packet{Version: 2, SequenceNumber: sequence + 1, Timestamp: timestamp + samplesPerFrame}); err != nil {
-				t.Fatal(err)
+			if innerWriteRTPErr := raw.WriteRTP(
+				&rtp.Packet{Version: 2, SequenceNumber: sequence + 1, Timestamp: timestamp + samplesPerFrame},
+			); innerWriteRTPErr != nil {
+				t.Fatal(innerWriteRTPErr)
 			}
 			select {
-			case err := <-done:
-				done <- err
-				if err == nil || err.Error() != "invalid remote Opus packet" {
-					t.Fatal("empty non-padding RTP was not rejected", err)
+			case terminalErr := <-done:
+				done <- terminalErr
+				if terminalErr == nil || terminalErr.Error() != "invalid remote Opus packet" {
+					t.Fatal("empty non-padding RTP was not rejected", terminalErr)
 				}
 			case <-ctx.Done():
 				t.Fatal("empty non-padding RTP did not end the receiver")
@@ -611,15 +649,15 @@ func TestRemoteAudioAfterLongPadding(t *testing.T) {
 func TestRemoteAudioLatePaddingBeforeBufferedSpeech(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	a, b := localPeer(t, ctx), localPeer(t, ctx)
+	a, b := localPeer(ctx, t), localPeer(ctx, t)
 	raw, err := webrtc.NewTrackLocalStaticRTP(b.mic.Codec(), b.mic.ID(), b.mic.StreamID())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.pc.GetSenders()[0].ReplaceTrack(raw); err != nil {
-		t.Fatal(err)
+	if replaceTrackErr := b.pc.GetSenders()[0].ReplaceTrack(raw); replaceTrackErr != nil {
+		t.Fatal(replaceTrackErr)
 	}
-	connectLocalPeers(t, ctx, a, b)
+	connectLocalPeers(ctx, t, a, b)
 	e := newStationEpoch(ctx, 1)
 	done := make(chan error, 1)
 	go func() {
@@ -639,9 +677,9 @@ func TestRemoteAudioLatePaddingBeforeBufferedSpeech(t *testing.T) {
 	for i := range packets {
 		frame := toneFrame(1, i, 440)
 		data := make([]byte, 4000)
-		n, err := encoder.Encode(frame.pcm[:], data)
-		if err != nil {
-			t.Fatal(err)
+		n, encodeErr := encoder.Encode(frame.pcm[:], data)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
 		}
 		packets[i] = data[:n]
 	}
@@ -651,8 +689,8 @@ func TestRemoteAudioLatePaddingBeforeBufferedSpeech(t *testing.T) {
 		if payload == nil {
 			packet.Padding, packet.PaddingSize = true, 1
 		}
-		if err := raw.WriteRTP(packet); err != nil {
-			t.Fatal(err)
+		if writeRTPErr := raw.WriteRTP(packet); writeRTPErr != nil {
+			t.Fatal(writeRTPErr)
 		}
 	}
 	write(100, 1000, packets[0])
@@ -669,9 +707,9 @@ func TestRemoteAudioLatePaddingBeforeBufferedSpeech(t *testing.T) {
 		select {
 		case block := <-e.output.playback:
 			blocks = append(blocks, block)
-		case err := <-done:
-			done <- err
-			t.Fatal("receiver ended", err)
+		case operationErr := <-done:
+			done <- operationErr
+			t.Fatal("receiver ended", operationErr)
 		case <-deadline.C:
 			t.Fatalf("decoded %d of 4 valid media packets after reordered padding", len(blocks))
 		}
@@ -688,9 +726,9 @@ func TestRemoteAudioLatePaddingBeforeBufferedSpeech(t *testing.T) {
 			}
 		}
 		pcm := make([]int16, samplesPerFrame*2)
-		n, err := decoder.Decode(packets[i], pcm)
-		if err != nil {
-			t.Fatal(err)
+		n, decodeErr := decoder.Decode(packets[i], pcm)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
 		}
 		if block.used != n || !slices.Equal(block.pcm[:n*2], pcm[:n*2]) {
 			t.Fatalf("reordered padding changed decoded PCM for media packet %d", i)

@@ -1,3 +1,5 @@
+// POSIX requires this feature-test macro before any system header.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
 #define _POSIX_C_SOURCE 200809L
 #include "station_native.h"
 #include <dlfcn.h>
@@ -26,8 +28,8 @@ static void append_error(char *out, size_t size, const char *message) {
     snprintf(out + used, size - used, "%s%s", used ? "; " : "", message);
 }
 
-static int vendor_error(station_spotter *s, void **error, char *out,
-                        size_t size, const char *operation) {
+static int vendor_error(station_spotter *s, void **error, char *out, size_t size,
+                        const char *operation) {
   if (!*error)
     return 0;
   append_error(out, size, operation);
@@ -50,8 +52,7 @@ int station_spotter_close(station_spotter *s, char *error, size_t size) {
   }
   if (s->conf) {
     s->conf_free(s->conf, &err);
-    if (vendor_error(s, &err, error, size,
-                     "native spotter configuration cleanup failed"))
+    if (vendor_error(s, &err, error, size, "native spotter configuration cleanup failed"))
       failed = -1;
   }
   if (s->library)
@@ -64,17 +65,16 @@ int station_spotter_close(station_spotter *s, char *error, size_t size) {
   return failed;
 }
 
-#define LOAD(member, symbol)                                                   \
-  do {                                                                         \
-    *(void **)(&s->member) = dlsym(s->library, symbol);                        \
-    if (!s->member) {                                                          \
-      snprintf(error, size, "missing vendor symbol %s", symbol);               \
-      goto fail;                                                               \
-    }                                                                          \
+#define LOAD(member, symbol)                                                                       \
+  do {                                                                                             \
+    *(void **)(&s->member) = dlsym(s->library, symbol);                                            \
+    if (!s->member) {                                                                              \
+      snprintf(error, size, "missing vendor symbol %s", symbol);                                   \
+      goto fail;                                                                                   \
+    }                                                                                              \
   } while (0)
 
-station_spotter *station_spotter_open(const char *model, char *error,
-                                      size_t size) {
+station_spotter *station_spotter_open(const char *model, char *error, size_t size) {
   if (size)
     error[0] = 0;
   station_spotter *s = calloc(1, sizeof(*s));
@@ -82,16 +82,13 @@ station_spotter *station_spotter_open(const char *model, char *error,
     snprintf(error, size, "cannot allocate native spotter");
     return NULL;
   }
-  s->iconv =
-      dlopen("/system/vendor/quasar/libs/libiconv.so", RTLD_NOW | RTLD_GLOBAL);
+  s->iconv = dlopen("/system/vendor/quasar/libs/libiconv.so", RTLD_NOW | RTLD_GLOBAL);
   if (!s->iconv)
     goto library_error;
-  s->tflite =
-      dlopen("/system/vendor/quasar/libs/libtflite.so", RTLD_NOW | RTLD_GLOBAL);
+  s->tflite = dlopen("/system/vendor/quasar/libs/libtflite.so", RTLD_NOW | RTLD_GLOBAL);
   if (!s->tflite)
     goto library_error;
-  s->library = dlopen("/system/vendor/quasar/libs/libyandex_evil.so",
-                      RTLD_NOW | RTLD_LOCAL);
+  s->library = dlopen("/system/vendor/quasar/libs/libyandex_evil.so", RTLD_NOW | RTLD_LOCAL);
   if (!s->library)
     goto library_error;
   LOAD(error_message, "spotter_error_get_message");
@@ -107,8 +104,7 @@ station_spotter *station_spotter_open(const char *model, char *error,
   LOAD(conf_free, "spotter_conf_free");
   void *err = NULL;
   s->conf = s->conf_read(model, &err);
-  if (vendor_error(s, &err, error, size,
-                   "native spotter configuration read failed"))
+  if (vendor_error(s, &err, error, size, "native spotter configuration read failed"))
     goto fail;
   if (!s->conf) {
     snprintf(error, size, "vendor returned no configuration");
@@ -140,8 +136,8 @@ fail:
   }
 }
 
-int station_spotter_feed(station_spotter *s, const int16_t *pcm, size_t bytes,
-                         char *error, size_t size) {
+int station_spotter_feed(station_spotter *s, const int16_t *pcm, size_t bytes, char *error,
+                         size_t size) {
   if (size)
     error[0] = 0;
   if (bytes != 640) {
@@ -164,8 +160,7 @@ int station_spotter_feed(station_spotter *s, const int16_t *pcm, size_t bytes,
       if (vendor_error(s, &err, error, size, "native spotter phrase ID failed"))
         return -1;
       const char *phrase = s->phrase(s->detector, &err);
-      if (vendor_error(s, &err, error, size,
-                       "native spotter phrase read failed"))
+      if (vendor_error(s, &err, error, size, "native spotter phrase read failed"))
         return -1;
       if (phrase_id == 1 && phrase && strcmp(phrase, "яндекс") == 0)
         confirmed = 1;

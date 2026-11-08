@@ -26,6 +26,7 @@ only while native Alice explicitly reports IDLE. Алиса stays native.
 auth status prints the saved token's unverified expiry in UTC, without the token.
 `
 
+//nolint:gocognit // The command dispatch keeps flag errors and credential input on their existing output paths.
 func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if len(args) == 0 {
 		return runStation(ctx, credentialPath(), sessionSettings{}, out)
@@ -76,6 +77,7 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 }
 
 func importCommand(ctx context.Context, input string, out io.Writer) error {
+	//nolint:gosec // Auth import intentionally opens the path explicitly selected by --session-json.
 	f, err := os.Open(input)
 	if err != nil {
 		return errors.New("cannot open the selected sign-in file")
@@ -83,13 +85,21 @@ func importCommand(ctx context.Context, input string, out io.Writer) error {
 	defer f.Close()
 	client := signalingClient()
 	defer client.CloseIdleConnections()
-	if err := importBrowserSession(ctx, credentialPath(), client, f); err != nil {
+	if importBrowserSessionErr := importBrowserSession(
+		ctx,
+		credentialPath(),
+		client,
+		f,
+	); importBrowserSessionErr != nil {
 		if ctx.Err() != nil {
 			return errors.New("sign-in import was interrupted; inspect make status before retrying")
 		}
-		return err
+		return importBrowserSessionErr
 	}
-	_, err = fmt.Fprintln(out, "Signed in. The Station saved a renewable ChatGPT session; a running client uses it from its next call.")
+	_, err = fmt.Fprintln(
+		out,
+		"Signed in. The Station saved a renewable ChatGPT session; a running client uses it from its next call.",
+	)
 	return err
 }
 

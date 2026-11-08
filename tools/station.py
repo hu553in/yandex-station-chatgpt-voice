@@ -5,17 +5,17 @@ import argparse
 import hashlib
 import ipaddress
 import os
-from pathlib import Path
 import re
 import secrets
 import shlex
 import struct
-import subprocess
+import subprocess  # nosec B404 # explicit local argv, no host shell
 import sys
 import tempfile
+from pathlib import Path
 
 APP = "/data/yandex-station-chatgpt-voice"
-LOG = "/tmp/yandex-station-chatgpt-voice.log"
+LOG = "/tmp/yandex-station-chatgpt-voice.log"  # nosec B108 # device log guarded for symlinks and mode 0600
 LIBS = "/system/vendor/quasar/libs:/system/vendor/lib:/system/lib:/usr/lib:/lib"
 BINARY = Path(__file__).resolve().parent.parent / "build/yandex-station-chatgpt-voice"
 BROWSER_LOGIN = Path(__file__).resolve().parent / "browser_login.py"
@@ -166,23 +166,21 @@ start_client() {
     [ "$running" = 1 ] || die 'Client exited during startup; inspect its log.'
     echo 'Client started.'
 }
-""".replace("__LIBS__", shlex.quote(LIBS))
+""".replace("__LIBS__", shlex.quote(LIBS))  # noqa: E501
 
 
 def boot_check():
     checks = "\n".join(
-        f'[ ! -L {shlex.quote(path)} ] && [ -f {shlex.quote(path)} ] || return 1\n'
-        f'sum=$(sha256sum {shlex.quote(path)}) || return 1\n'
-        'set -- $sum\n'
+        f"[ ! -L {shlex.quote(path)} ] && [ -f {shlex.quote(path)} ] || return 1\n"
+        f"sum=$(sha256sum {shlex.quote(path)}) || return 1\n"
+        "set -- $sum\n"
         f'[ "$1" = {shlex.quote(digest)} ] || return 1'
         for path, digest in BOOT_HASHES.items()
     )
     return (
-        'boot_scripts_ok() {\n'
+        "boot_scripts_ok() {\n"
         '[ "$(readlink -f /proc/1/exe)" = /bin/busybox ] || return 1\n'
-        '[ "$(readlink -f /data)" = /bkupgrade/data ] || return 1\n'
-        + checks
-        + "\n}\n"
+        '[ "$(readlink -f /data)" = /bkupgrade/data ] || return 1\n' + checks + "\n}\n"
     )
 
 
@@ -243,7 +241,7 @@ else
     mv -f {shlex.quote(stage)} "$app/client"
     echo 'Previous client restored and stopped. Use make start to activate.'
 fi
-""",
+""",  # noqa: E501
     )
     print(output.decode(errors="replace").strip())
 
@@ -261,7 +259,7 @@ boot_scripts_ok || die 'Boot scripts not recognized; autostart was not installed
 [ -f "$app/start.sh" ] && [ ! -L "$app/start.sh" ] || die 'Run make start once first.'
 LD_LIBRARY_PATH=__LIBS__ "$app/client" supervise --help >/dev/null 2>&1 || die 'Install the supervised client first.'
 [ "$present" = 0 ] || { echo 'Autostart already enabled.'; exit 0; }
-""".replace("__LIBS__", shlex.quote(LIBS))
+""".replace("__LIBS__", shlex.quote(LIBS))  # noqa: E501
         if enable
         else """
 [ "$present" = 1 ] || { echo 'Autostart already disabled.'; exit 0; }
@@ -293,7 +291,7 @@ if [ -e "$hook" ] || [ -L "$hook" ]; then
     [ -f "$hook" ] && [ ! -L "$hook" ] && cmp -s "$hook" {shlex.quote(stage)} || die 'Boot hook is not ours; inspect before changing it.'
     present=1
 fi
-"""
+"""  # noqa: E501
         + operation
         + """
 mkdir "$system_lock" || die 'Persistence lock exists; inspect before retrying.'
@@ -325,7 +323,7 @@ esac
 
 def adb_run(args, *command, quiet=False):
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 # explicitly selected ADB argv, no host shell
             [args.adb, "-s", args.serial, *command],
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -344,29 +342,29 @@ def adb_run(args, *command, quiet=False):
         args.uncertain = True
         detail = "" if quiet else result.stderr.decode(errors="replace").strip()
         raise RuntimeError(
-            "ADB command failed; remote state may be unknown."
-            + ("\n" + detail if detail else "")
+            "ADB command failed; remote state may be unknown." + ("\n" + detail if detail else "")
         )
     return result.stdout
 
 
 def _adb_shell_inline(args, script, quiet=False):
     marker = "__VOICE_STATUS_" + secrets.token_hex(16) + "__"
-    command = f"sh -c {shlex.quote(script)}; voice_status=$?; printf '\\n{marker}%s\\n' \"$voice_status\""
+    command = (
+        f"sh -c {shlex.quote(script)}; voice_status=$?; printf '\\n{marker}%s\\n' \"$voice_status\""
+    )
     output = adb_run(args, "shell", command, quiet=quiet)
     frame = re.search(rb"\r?\n" + marker.encode() + rb"([0-9]+)\r?\n\Z", output)
     if frame is None or output.count(marker.encode()) != 1:
         args.uncertain = True
         raise RuntimeError(
-            "ADB shell completion frame is missing or malformed; remote state is unknown. Inspect before retrying."
+            "ADB shell completion frame is missing or malformed; remote state "
+            "is unknown. Inspect before retrying."
         )
     content = output[: frame.start()].replace(b"\r\n", b"\n")
     code = int(frame[1])
     if code:
         detail = "" if quiet else content.decode(errors="replace").strip()
-        raise RuntimeError(
-            f"Station command failed ({code})." + ("\n" + detail if detail else "")
-        )
+        raise RuntimeError(f"Station command failed ({code})." + ("\n" + detail if detail else ""))
     return content
 
 
@@ -386,7 +384,8 @@ def adb_shell(args, script, quiet=False):
         if re.fullmatch(rb"/tmp/voice-script-[A-Za-z0-9]+\n", output) is None:
             args.uncertain = True
             raise RuntimeError(
-                "ADB returned an invalid temporary script path; remote state is unknown. Inspect before retrying."
+                "ADB returned an invalid temporary script path; remote state is "
+                "unknown. Inspect before retrying."
             )
         remote = output.decode().strip()
         adb_run(args, "push", str(local), remote, quiet=quiet)
@@ -400,7 +399,8 @@ def adb_shell(args, script, quiet=False):
         cleanup_error = None
         if args.uncertain:
             print(
-                "Remote state is unknown; temporary remote files are retained if present. Inspect before retrying.",
+                "Remote state is unknown; temporary remote files are retained if "
+                "present. Inspect before retrying.",
                 file=sys.stderr,
             )
         elif remote is not None:
@@ -449,7 +449,7 @@ def owned(nonce):
         COMMON
         + f"""
 [ ! -L "$lock" ] && [ "$(cat "$lock/owner")" = {shlex.quote(nonce)} ] || die 'Mutation lock ownership changed.'
-"""
+"""  # noqa: E501
     )
 
 
@@ -457,15 +457,12 @@ def release(args, nonce, stage):
     cleanup = f"rm -f {shlex.quote(stage)}\n" if stage else ""
     if args.uncertain:
         print(
-            "Remote state is unknown; staging file and mutation lock are retained if present. Inspect before retrying.",
+            "Remote state is unknown; staging file and mutation lock are "
+            "retained if present. Inspect before retrying.",
             file=sys.stderr,
         )
     else:
-        adb_shell(
-            args,
-            owned(nonce) + cleanup + 'rm -f "$lock/owner"\nrmdir "$lock"\n',
-            quiet=True,
-        )
+        adb_shell(args, owned(nonce) + cleanup + 'rm -f "$lock/owner"\nrmdir "$lock"\n', quiet=True)
 
 
 def arm_binary(path):
@@ -474,13 +471,7 @@ def arm_binary(path):
         raise ValueError("Build output must be a 32-bit little-endian ARM ELF.")
     kind, machine, version = struct.unpack_from("<HHI", data, 16)
     flags = struct.unpack_from("<I", data, 36)[0]
-    if (
-        kind not in (2, 3)
-        or machine != 40
-        or version != 1
-        or flags >> 24 != 5
-        or not flags & 0x400
-    ):
+    if kind not in (2, 3) or machine != 40 or version != 1 or flags >> 24 != 5 or not flags & 0x400:
         raise ValueError("Build output must use ARM EABI5 and the hard-float ABI.")
     return data
 
@@ -489,7 +480,8 @@ def install(args, nonce, stage, data):
     adb_run(args, "push", str(BINARY), stage)
     if adb_read(args, stage) != data:
         raise RuntimeError(
-            "Uploaded candidate differs from the local ARM binary; installed client was not touched."
+            "Uploaded candidate differs from the local ARM binary; installed "
+            "client was not touched."
         )
     adb_shell(
         args,
@@ -513,7 +505,7 @@ if [ -f "$app/client" ] && ! cmp -s "$app/client" {shlex.quote(stage)}; then
 fi
 mv -f {shlex.quote(stage)} "$app/client"
 echo 'Client installed and stopped. Use make start or make install restart to activate.'
-""",
+""",  # noqa: E501
     )
     print(output.decode(errors="replace").strip())
 
@@ -529,7 +521,7 @@ case "$(LD_LIBRARY_PATH={shlex.quote(LIBS)} "$app/client" help 2>/dev/null)" in
 *'make login'*) ;;
 *) die 'The installed client cannot use browser sign-in. Run make install first.' ;;
 esac
-""",
+""",  # noqa: E501
     )
 
 
@@ -537,13 +529,17 @@ def browser_sign_in(local):
     command = [
         os.environ.get("UV") or "uv",
         "run",
-        "--script",
+        "--locked",
+        "--no-dev",
+        "--project",
+        str(BROWSER_LOGIN.parent.parent),
+        "python",
         str(BROWSER_LOGIN),
         "--chrome=" + os.environ.get("CHROME", ""),
         str(local),
     ]
     try:
-        process = subprocess.Popen(command)
+        process = subprocess.Popen(command)  # nosec B603 # fixed uv subcommands and project paths, no shell
     except OSError:
         raise RuntimeError("Cannot run uv; install it as described in the README.") from None
     try:
@@ -556,7 +552,7 @@ def browser_sign_in(local):
         code = 130
     if code == 130:
         print("Sign-in canceled; the Station was not changed.", file=sys.stderr)
-        raise SystemExit(130)
+        raise SystemExit(130) from None
     if code:
         raise RuntimeError("Browser sign-in did not finish; the Station was not changed.")
     try:
@@ -564,7 +560,9 @@ def browser_sign_in(local):
     except OSError:
         data = b""
     if not data or len(data) > LIMIT:
-        raise RuntimeError("Browser sign-in produced no usable result; the Station was not changed.")
+        raise RuntimeError(
+            "Browser sign-in produced no usable result; the Station was not changed."
+        )
     return data
 
 
@@ -581,7 +579,7 @@ def import_sign_in(args, nonce, stage, local, data):
 chmod 600 {shlex.quote(stage)}
 [ -f "$app/client" ] && [ ! -L "$app/client" ] && [ -x "$app/client" ] || die 'Install the client first: make install.'
 LD_LIBRARY_PATH={shlex.quote(LIBS)} "$app/client" auth import --session-json {shlex.quote(stage)} 2>&1
-""",
+""",  # noqa: E501
     )
     print(output.decode(errors="replace").strip())
 
@@ -617,7 +615,7 @@ for path in /lib/ld-linux-armhf.so.3 /usr/bin/aplay /dev/snd \
     /system/vendor/quasar/libs/libyandex_evil.so /system/vendor/quasar/spotter_models/activation/yandex; do
     if [ -r "$path" ]; then echo "Runtime present $path"; else echo "Runtime missing $path"; fi
 done
-""",
+""",  # noqa: E501
     )
     print(output.decode(errors="replace").strip())
     output = adb_shell(
@@ -635,12 +633,13 @@ else
     echo 'Autostart disabled.'
 fi
 if [ -e "$app/stopped" ] || [ -L "$app/stopped" ]; then echo 'Autostart paused by stop, install or rollback.'; fi
-""",
+""",  # noqa: E501
     )
     print(output.decode(errors="replace").strip())
 
 
-def main():
+# Keep the command dispatch and its single lock/cleanup lifecycle together.
+def main():  # noqa: PLR0912, PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--ip", required=True, type=ipaddress.IPv4Address)
@@ -666,13 +665,8 @@ def main():
     args.uncertain = False
     if args.action == "connect":
         output = adb_run(args, "connect", args.serial).decode(errors="replace").strip()
-        if output not in (
-            f"connected to {args.serial}",
-            f"already connected to {args.serial}",
-        ):
-            raise RuntimeError(
-                "ADB did not confirm connection to the selected Station."
-            )
+        if output not in (f"connected to {args.serial}", f"already connected to {args.serial}"):
+            raise RuntimeError("ADB did not confirm connection to the selected Station.")
         print(output)
         return
     if args.action == "status":
@@ -683,7 +677,9 @@ def main():
         command = [args.adb, "-s", args.serial, "shell"]
         if args.action == "logs":
             command.append(f"tail -n 100 -f {shlex.quote(LOG)}")
-        raise SystemExit(subprocess.call(command))
+        # Run the explicitly selected ADB argv without a host shell.
+        exit_code = subprocess.call(command)  # nosec B603
+        raise SystemExit(exit_code)
     data = arm_binary(BINARY) if args.action == "install" else None
     if args.action == "login":
         login_preflight(args)
@@ -692,8 +688,7 @@ def main():
         options = [
             "--voice=" + os.environ.get("VOICE", ""),
             "--backend-model=" + os.environ.get("BACKEND_MODEL", ""),
-            "--backend-thinking-effort="
-            + os.environ.get("BACKEND_THINKING_EFFORT", ""),
+            "--backend-thinking-effort=" + os.environ.get("BACKEND_THINKING_EFFORT", ""),
         ]
         try:
             for option in options:
@@ -701,9 +696,7 @@ def main():
                 if "\0" in option:
                     raise ValueError("Session settings cannot contain NUL.")
         except UnicodeError:
-            raise ValueError(
-                "Session settings must be representable as UTF-8."
-            ) from None
+            raise ValueError("Session settings must be representable as UTF-8.") from None
         launch = "start_client " + shlex.join(options)
         operation = 'rm -f "$app/stopped"\n' + launch
         if args.action == "restart":
@@ -711,7 +704,16 @@ def main():
     nonce = secrets.token_hex(16)
     stage = (
         f"{APP}/.{'auth' if args.action == 'login' else 'candidate'}-{nonce}"
-        if args.action in ("install", "login", "start", "restart", "rollback", "enable-autostart", "disable-autostart")
+        if args.action
+        in (
+            "install",
+            "login",
+            "start",
+            "restart",
+            "rollback",
+            "enable-autostart",
+            "disable-autostart",
+        )
         else None
     )
     with tempfile.TemporaryDirectory(prefix="voice-login-") as directory:
@@ -741,7 +743,8 @@ def main():
                 if not failed:
                     raise
                 print(
-                    "Remote cleanup could not be confirmed; inspect the mutation lock and staging file.",
+                    "Remote cleanup could not be confirmed; inspect the mutation lock "
+                    "and staging file.",
                     file=sys.stderr,
                 )
 
@@ -751,7 +754,7 @@ if __name__ == "__main__":
         main()
     except (OSError, ValueError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
     except (KeyboardInterrupt, EOFError):
         print("Canceled; inspect remote state before retrying.", file=sys.stderr)
-        raise SystemExit(130)
+        raise SystemExit(130) from None

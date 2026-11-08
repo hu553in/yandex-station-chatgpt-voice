@@ -17,7 +17,11 @@ func syntheticJWT(claims string) string {
 }
 
 func syntheticSession(token string) webSession {
-	return webSession{AccessToken: token, DeviceID: "offline-device", Cookies: []sessionCookie{{Name: sessionCookieName, Value: "synthetic-private-cookie"}}}
+	return webSession{
+		AccessToken: token,
+		DeviceID:    "offline-device",
+		Cookies:     []sessionCookie{{Name: sessionCookieName, Value: "synthetic-private-cookie"}},
+	}
 }
 
 func TestPrivateSessionPersistence(t *testing.T) {
@@ -34,9 +38,9 @@ func TestPrivateSessionPersistence(t *testing.T) {
 		t.Fatal("saved session did not round-trip", err)
 	}
 	for name, mode := range map[string]os.FileMode{filepath.Dir(path): 0700, path: 0600} {
-		info, err := os.Stat(name)
-		if err != nil || info.Mode().Perm() != mode {
-			t.Fatalf("permissions %s %v", name, err)
+		info, statErr := os.Stat(name)
+		if statErr != nil || info.Mode().Perm() != mode {
+			t.Fatalf("permissions %s %v", name, statErr)
 		}
 	}
 	for _, invalid := range []webSession{
@@ -65,27 +69,27 @@ func TestPrivateSessionPersistence(t *testing.T) {
 		t.Fatal("public session file accepted")
 	}
 	link := filepath.Join(filepath.Dir(path), "linked.json")
-	if err := os.Chmod(path, 0600); err != nil {
-		t.Fatal(err)
+	if chmodErr := os.Chmod(path, 0600); chmodErr != nil {
+		t.Fatal(chmodErr)
 	}
-	if err := os.Symlink(path, link); err != nil {
-		t.Fatal(err)
+	if symlinkErr := os.Symlink(path, link); symlinkErr != nil {
+		t.Fatal(symlinkErr)
 	}
-	if _, err := readSessionFile(link); err == nil {
+	if _, readSessionFileErr := readSessionFile(link); readSessionFileErr == nil {
 		t.Fatal("symlinked session file accepted")
 	}
 	fifo := filepath.Join(filepath.Dir(path), "fifo.json")
-	if err := syscall.Mkfifo(fifo, 0600); err != nil {
-		t.Fatal(err)
+	if mkfifoErr := syscall.Mkfifo(fifo, 0600); mkfifoErr != nil {
+		t.Fatal(mkfifoErr)
 	}
-	if _, err := readSessionFile(fifo); err == nil {
+	if _, fifoErr := readSessionFile(fifo); fifoErr == nil {
 		t.Fatal("FIFO session file accepted")
 	}
 	large := filepath.Join(filepath.Dir(path), "large.json")
-	if err := os.WriteFile(large, bytes.Repeat([]byte(" "), maxCredentialBytes+1), 0600); err != nil {
-		t.Fatal(err)
+	if writeFileErr := os.WriteFile(large, bytes.Repeat([]byte(" "), maxCredentialBytes+1), 0600); writeFileErr != nil {
+		t.Fatal(writeFileErr)
 	}
-	if _, err := readSessionFile(large); err == nil {
+	if _, oversizedErr := readSessionFile(large); oversizedErr == nil {
 		t.Fatal("oversized session file accepted")
 	}
 }
@@ -149,14 +153,17 @@ func TestCredentialRenameAndCleanupFailure(t *testing.T) {
 		return errors.New("private filesystem details")
 	}
 	err := writeSessionFile(path, syntheticSession("synthetic-private-token"))
-	if err == nil || !strings.Contains(err.Error(), "cannot replace private credential file") || !strings.Contains(err.Error(), "cannot remove temporary credential file") || strings.Contains(err.Error(), "synthetic") || strings.Contains(err.Error(), "filesystem") {
+	if err == nil || !strings.Contains(err.Error(), "cannot replace private credential file") ||
+		!strings.Contains(err.Error(), "cannot remove temporary credential file") ||
+		strings.Contains(err.Error(), "synthetic") ||
+		strings.Contains(err.Error(), "filesystem") {
 		t.Fatal("save lost its primary or cleanup failure, or leaked data", err)
 	}
 	if filepath.Dir(temporary) != dir || !strings.HasPrefix(filepath.Base(temporary), ".session-") {
 		t.Fatal("cleanup did not target the write-side temporary file")
 	}
-	if _, err := os.Stat(temporary); err != nil {
-		t.Fatal("fixture did not leave a temporary file to report", err)
+	if _, statErr := os.Stat(temporary); statErr != nil {
+		t.Fatal("fixture did not leave a temporary file to report", statErr)
 	}
 }
 
@@ -188,8 +195,8 @@ func TestAuthStatus(t *testing.T) {
 				t.Fatal(err)
 			}
 			var output bytes.Buffer
-			if err := writeAuthStatus(path, &output); err != nil {
-				t.Fatal(err)
+			if writeAuthStatusErr := writeAuthStatus(path, &output); writeAuthStatusErr != nil {
+				t.Fatal(writeAuthStatusErr)
 			}
 			if output.String() != "Saved token expiry (unverified): "+tc.want+"\n" {
 				t.Fatal("status did not return only expiry metadata", output.String())
@@ -209,8 +216,12 @@ func TestAuthStatusCredentialFailure(t *testing.T) {
 	if err == nil || output.Len() != 0 || strings.Contains(err.Error(), "synthetic-private") {
 		t.Fatal("missing session was accepted or disclosed private details")
 	}
-	if err := os.WriteFile(path, []byte(`{"accessToken":"synthetic-private-token"`), 0600); err != nil {
-		t.Fatal(err)
+	if writeFileErr := os.WriteFile(
+		path,
+		[]byte(`{"accessToken":"synthetic-private-token"`),
+		0600,
+	); writeFileErr != nil {
+		t.Fatal(writeFileErr)
 	}
 	err = writeAuthStatus(path, &output)
 	if err == nil || output.Len() != 0 || strings.Contains(err.Error(), "synthetic-private") {
@@ -229,15 +240,23 @@ func TestRollbackClientReadsRenewableSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	var bare credential
-	if err := json.Unmarshal(data, &bare); err != nil || bare != saved.credential || !validCredential(bare) {
-		t.Fatal("a token-only client could not read the renewable session", err)
+	if unmarshalErr := json.Unmarshal(
+		data,
+		&bare,
+	); unmarshalErr != nil || bare != saved.credential ||
+		!validCredential(bare) {
+		t.Fatal("a token-only client could not read the renewable session", unmarshalErr)
 	}
 	transfer, err := os.ReadFile(filepath.Join("testdata", "browser-sign-in.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var old credential
-	if err := json.Unmarshal(transfer, &old); err != nil || validCredential(credential{AccessToken: strings.TrimSpace(old.AccessToken), DeviceID: "offline-device"}) {
-		t.Fatal("a token-only client would accept the cookie-only sign-in transfer", err)
+	if innerUnmarshalErr := json.Unmarshal(
+		transfer,
+		&old,
+	); innerUnmarshalErr != nil ||
+		validCredential(credential{AccessToken: strings.TrimSpace(old.AccessToken), DeviceID: "offline-device"}) {
+		t.Fatal("a token-only client would accept the cookie-only sign-in transfer", innerUnmarshalErr)
 	}
 }

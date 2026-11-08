@@ -23,6 +23,7 @@ type nativeSpotter struct {
 	directory string
 }
 
+//nolint:nonamedreturns // Deferred failure cleanup needs both the created directory and the final error.
 func modelOverlay(stock string) (directory string, result error) {
 	flags, err := os.ReadFile(filepath.Join(stock, "flags.txt"))
 	if err != nil {
@@ -46,12 +47,12 @@ func modelOverlay(stock string) (directory string, result error) {
 		}
 	}()
 	for _, file := range []string{"acoustic_model.nnet", "words.txt"} {
-		if err := os.Symlink(filepath.Join(stock, file), filepath.Join(directory, file)); err != nil {
-			return directory, err
+		if symlinkErr := os.Symlink(filepath.Join(stock, file), filepath.Join(directory, file)); symlinkErr != nil {
+			return directory, symlinkErr
 		}
 	}
-	if err := os.WriteFile(filepath.Join(directory, "flags.txt"), []byte(text), 0600); err != nil {
-		return directory, err
+	if writeFileErr := os.WriteFile(filepath.Join(directory, "flags.txt"), []byte(text), 0600); writeFileErr != nil {
+		return directory, writeFileErr
 	}
 	return directory, nil
 }
@@ -66,7 +67,11 @@ func newNativeSpotter() (*nativeSpotter, error) {
 	var message [512]C.char
 	native := C.station_spotter_open(model, &message[0], C.size_t(len(message)))
 	if native == nil {
-		return nil, fmt.Errorf("%w: %w", errStationAudio, errors.Join(errors.New(C.GoString(&message[0])), removeModelOverlay(dir)))
+		return nil, fmt.Errorf(
+			"%w: %w",
+			errStationAudio,
+			errors.Join(errors.New(C.GoString(&message[0])), removeModelOverlay(dir)),
+		)
 	}
 	return &nativeSpotter{native: native, directory: dir}, nil
 }
@@ -76,7 +81,13 @@ func (s *nativeSpotter) feed(pcm []int16) (bool, error) {
 		return false, errors.New("native spotter requires a 20ms capture frame")
 	}
 	var message [512]C.char
-	result := C.station_spotter_feed(s.native, (*C.int16_t)(unsafe.Pointer(&pcm[0])), C.size_t(len(pcm)*2), &message[0], C.size_t(len(message)))
+	result := C.station_spotter_feed(
+		s.native,
+		(*C.int16_t)(unsafe.Pointer(&pcm[0])),
+		C.size_t(len(pcm)*pcmSampleBytes),
+		&message[0],
+		C.size_t(len(message)),
+	)
 	if result < 0 {
 		return false, fmt.Errorf("%w: %s", errStationAudio, C.GoString(&message[0]))
 	}

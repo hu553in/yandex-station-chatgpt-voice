@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@v7
+      - uses: oven-sh/setup-bun@v2
+      # The shared Go workflow has no host Opus prerequisite for CGo tests.
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          install-only: true
+      - uses: hu553in/common-things/.github/actions/setup-shfmt@main
+      - run: make install-deps
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: make check

@@ -11,6 +11,9 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+const activationCapability = "ActivationSpotterCapability"
+const stationDialTimeout = 3 * time.Second
+
 const maxIPCBytes = 10 << 20
 const audioStallTimeout = 3 * time.Second
 
@@ -57,6 +60,8 @@ func wireFields(data []byte, visit func(wireField) error) error {
 			f.integer, n = protowire.ConsumeVarint(data)
 		case protowire.BytesType:
 			f.bytes, n = protowire.ConsumeBytes(data)
+		case protowire.Fixed32Type, protowire.Fixed64Type, protowire.StartGroupType, protowire.EndGroupType:
+			n = protowire.ConsumeFieldValue(num, typ, data)
 		default:
 			n = protowire.ConsumeFieldValue(num, typ, data)
 		}
@@ -129,6 +134,7 @@ func audioRequest() []byte {
 	body = protowire.AppendBytes(body, payload)
 	body = protowire.AppendTag(body, 253, protowire.VarintType)
 	body = protowire.AppendVarint(body, 159)
+	//nolint:gosec // The fixed subscription envelope is far smaller than the uint32 IPC length limit.
 	out := binary.LittleEndian.AppendUint32(nil, uint32(len(body)))
 	return append(out, body...)
 }
@@ -162,6 +168,7 @@ func decodeAlice(data []byte) (aliceState, error) {
 	return state, err
 }
 
+//nolint:gocognit // Keep firmware capability dispatch beside duplicate-field and wire-type checks.
 func decodeNativeEvent(e ipcEnvelope) (nativeEvent, error) {
 	if e.kind == 3 {
 		state, err := decodeAlice(e.payload)
@@ -202,7 +209,7 @@ func decodeNativeEvent(e ipcEnvelope) (nativeEvent, error) {
 			return nativeEvent{}, errors.New("missing Alice listener")
 		}
 		listener = alice
-	case "ActivationSpotterCapability":
+	case activationCapability:
 		if !haveActivation {
 			return nativeEvent{}, errors.New("missing activation listener")
 		}
@@ -216,19 +223,19 @@ func decodeNativeEvent(e ipcEnvelope) (nativeEvent, error) {
 	err = wireFields(listener, func(f wireField) error {
 		switch f.number {
 		case 1:
-			if err := f.require(protowire.VarintType, &haveMethod); err != nil {
-				return err
+			if requireErr := f.require(protowire.VarintType, &haveMethod); requireErr != nil {
+				return requireErr
 			}
 			method = f.integer
 		case 2:
 			if string(capability) == "AliceCapability" {
-				if err := f.require(protowire.BytesType, &haveState); err != nil {
-					return err
+				if stateFieldErr := f.require(protowire.BytesType, &haveState); stateFieldErr != nil {
+					return stateFieldErr
 				}
 				state = f.bytes
 			}
 		case 3:
-			if string(capability) == "ActivationSpotterCapability" {
+			if string(capability) == activationCapability {
 				return f.require(protowire.BytesType, &havePhrase)
 			}
 		}
@@ -240,7 +247,7 @@ func decodeNativeEvent(e ipcEnvelope) (nativeEvent, error) {
 	if !haveMethod {
 		return nativeEvent{}, errors.New("missing native listener method")
 	}
-	if string(capability) == "ActivationSpotterCapability" {
+	if string(capability) == activationCapability {
 		return nativeEvent{activation: method == 2}, nil
 	}
 	if method != 0 {
@@ -253,6 +260,7 @@ func decodeNativeEvent(e ipcEnvelope) (nativeEvent, error) {
 	return nativeEvent{state: value, stateChanged: true}, err
 }
 
+//nolint:gocognit // Keep channel selection beside the format and duplicate-field checks before delivering PCM.
 func decodeAudio(e ipcEnvelope, consume func([]byte) error) error {
 	if e.kind != 158 {
 		return nil
@@ -309,7 +317,7 @@ func decodeAudio(e ipcEnvelope, consume func([]byte) error) error {
 }
 
 func dialStation(ctx context.Context, address string) (net.Conn, error) {
-	return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp4", address)
+	return (&net.Dialer{Timeout: stationDialTimeout}).DialContext(ctx, "tcp4", address)
 }
 
 func readAlice(ctx context.Context, conn net.Conn, gate *stationGate) error {
@@ -358,16 +366,16 @@ func readCapture(ctx context.Context, conn net.Conn, capture *stationCapture) er
 		if err != nil {
 			return err
 		}
-		if err := decodeAudio(e, func(pcm []byte) error {
+		if decodeAudioErr := decodeAudio(e, func(pcm []byte) error {
 			if len(pcm) > 0 {
 				progress = time.Now()
 			}
-			if err := capture.pushPCM(pcm); err != nil {
-				return err
+			if pushPCMErr := capture.pushPCM(pcm); pushPCMErr != nil {
+				return pushPCMErr
 			}
 			return ctx.Err()
-		}); err != nil {
-			return err
+		}); decodeAudioErr != nil {
+			return decodeAudioErr
 		}
 	}
 }

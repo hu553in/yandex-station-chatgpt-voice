@@ -41,8 +41,10 @@ func TestPlaybackFinishesAcceptedSamplesBeforeAcknowledging(t *testing.T) {
 	done := finishPlayback(t, e)
 	e.output.queueDecoded([]int16{3000, 3000})
 	for _, tc := range []struct{ frames, sample int }{{480, 1000}, {960, 2000}} {
+		//nolint:gosec // Fixture indices and payload lengths are bounded by the literal test cases.
 		e.output.callback(output[:tc.frames*4], nil, uint32(tc.frames))
 		for i := range tc.frames * 2 {
+			//nolint:gosec // PCM uses the same 16 bits for signed samples and little-endian words.
 			if got := int16(binary.LittleEndian.Uint16(output[i*2:])); got != int16(tc.sample) {
 				t.Fatalf("accepted sample became %d, want %d", got, tc.sample)
 			}

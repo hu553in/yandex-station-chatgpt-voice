@@ -1,24 +1,19 @@
 #define dlopen fixture_dlopen
 #define dlsym fixture_dlsym
 #define dlclose fixture_dlclose
+// Include the implementation to interpose its vendor-loader calls in this fixture.
+// NOLINTNEXTLINE(bugprone-suspicious-include)
 #include "../station_native.c"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
-enum {
-  CONF_READ = 1,
-  RATE = 2,
-  CREATE = 4,
-  DESTROY = 8,
-  CONF_FREE = 16,
-  SUBMIT = 32,
-  EVENT = 64
-};
-static int conf, detector, failure, failures;
+enum { CONF_READ = 1, RATE = 2, CREATE = 4, DESTROY = 8, CONF_FREE = 16, SUBMIT = 32, EVENT = 64 };
+static int conf, detector, failure;
+static unsigned int failures;
 static int freed_errors, freed_confs, destroyed, closed_libraries;
 
-static void maybe_fail(int operation, void **err) {
+static void maybe_fail(unsigned int operation, void **err) {
   assert(*err == NULL);
   if (failures & operation)
     *err = &failure;
@@ -48,8 +43,7 @@ static uint32_t fixture_sample_rate(const void *model, void **err) {
   return 16000;
 }
 
-static void *fixture_create(const void *model, uint32_t rate, uint32_t option,
-                            void **err) {
+static void *fixture_create(const void *model, uint32_t rate, uint32_t option, void **err) {
   assert(model == &conf && rate == 16000 && option == 0);
   assert(err != NULL && *err == NULL);
   maybe_fail(CREATE, err);
@@ -68,8 +62,7 @@ static void fixture_conf_free(void *model, void **err) {
   maybe_fail(CONF_FREE, err);
 }
 
-static void fixture_submit(void *value, const void *pcm, size_t bytes,
-                           void **err) {
+static void fixture_submit(void *value, const void *pcm, size_t bytes, void **err) {
   assert(value == &detector && pcm && bytes == 640);
   maybe_fail(SUBMIT, err);
 }
@@ -118,46 +111,39 @@ void *fixture_dlsym(void *library, const char *symbol) {
 }
 
 int main(void) {
-  const int constructors[] = {CONF_READ, RATE, CREATE};
-  const char *primary[] = {"configuration read failed", "sample rate failed",
-                           "create failed"};
+  const unsigned int constructors[] = {CONF_READ, RATE, CREATE};
+  const char *primary[] = {"configuration read failed", "sample rate failed", "create failed"};
   for (size_t i = 0; i < 3; i++) {
-    for (int cleanup = 0; cleanup < 4; cleanup++) {
-      failures = constructors[i] | ((cleanup & 1) ? DESTROY : 0) |
-                 ((cleanup & 2) ? CONF_FREE : 0);
+    for (unsigned int cleanup = 0; cleanup < 4; cleanup++) {
+      failures =
+          constructors[i] | ((cleanup & 1u) ? DESTROY : 0u) | ((cleanup & 2u) ? CONF_FREE : 0u);
       freed_errors = freed_confs = destroyed = closed_libraries = 0;
       char error[512] = {0};
       assert(station_spotter_open("fixture", error, sizeof(error)) == NULL);
       assert(strstr(error, primary[i]) == error + strlen("native spotter "));
       assert(!strstr(error, "private"));
       int has_detector = constructors[i] == CREATE;
-      assert(destroyed == has_detector && freed_confs == 1 &&
-             closed_libraries == 3);
-      assert(freed_errors == 1 + ((has_detector && (cleanup & 1)) ? 1 : 0) +
-                                 ((cleanup & 2) ? 1 : 0));
-      assert((strstr(error, "destroy failed") != NULL) ==
-             !!(has_detector && (cleanup & 1)));
-      assert((strstr(error, "configuration cleanup failed") != NULL) ==
-             !!(cleanup & 2));
+      assert(destroyed == has_detector && freed_confs == 1 && closed_libraries == 3);
+      assert(freed_errors ==
+             1 + ((has_detector && (cleanup & 1u)) ? 1 : 0) + ((cleanup & 2u) ? 1 : 0));
+      assert((strstr(error, "destroy failed") != NULL) == !!(has_detector && (cleanup & 1u)));
+      assert((strstr(error, "configuration cleanup failed") != NULL) == !!(cleanup & 2u));
     }
   }
-  for (int cleanup = 0; cleanup < 4; cleanup++) {
-    failures = ((cleanup & 1) ? DESTROY : 0) | ((cleanup & 2) ? CONF_FREE : 0);
+  for (unsigned int cleanup = 0; cleanup < 4; cleanup++) {
+    failures = ((cleanup & 1u) ? DESTROY : 0u) | ((cleanup & 2u) ? CONF_FREE : 0u);
     freed_errors = freed_confs = destroyed = closed_libraries = 0;
     char error[512] = {0};
     station_spotter *s = station_spotter_open("fixture", error, sizeof(error));
     assert(s && !error[0]);
-    assert(station_spotter_close(s, error, sizeof(error)) ==
-           (cleanup ? -1 : 0));
+    assert(station_spotter_close(s, error, sizeof(error)) == (cleanup ? -1 : 0));
     assert(destroyed == 1 && freed_confs == 1 && closed_libraries == 3);
-    assert(freed_errors == ((cleanup & 1) ? 1 : 0) + ((cleanup & 2) ? 1 : 0));
-    assert((strstr(error, "destroy failed") != NULL) == !!(cleanup & 1));
-    assert((strstr(error, "configuration cleanup failed") != NULL) ==
-           !!(cleanup & 2));
+    assert(freed_errors == ((cleanup & 1u) ? 1 : 0) + ((cleanup & 2u) ? 1 : 0));
+    assert((strstr(error, "destroy failed") != NULL) == !!(cleanup & 1u));
+    assert((strstr(error, "configuration cleanup failed") != NULL) == !!(cleanup & 2u));
   }
-  const int feed_failures[] = {SUBMIT, EVENT};
-  const char *feed_errors[] = {"native spotter submit failed",
-                               "native spotter event read failed"};
+  const unsigned int feed_failures[] = {SUBMIT, EVENT};
+  const char *feed_errors[] = {"native spotter submit failed", "native spotter event read failed"};
   for (size_t i = 0; i < 2; i++) {
     failures = 0;
     freed_errors = 0;
@@ -166,8 +152,7 @@ int main(void) {
     station_spotter *s = station_spotter_open("fixture", error, sizeof(error));
     assert(s && !error[0]);
     failures = feed_failures[i];
-    assert(station_spotter_feed(s, pcm, sizeof(pcm), error, sizeof(error)) ==
-           -1);
+    assert(station_spotter_feed(s, pcm, sizeof(pcm), error, sizeof(error)) == -1);
     assert(strcmp(error, feed_errors[i]) == 0 && freed_errors == 1);
     assert(station_spotter_close(s, error, sizeof(error)) == 0);
   }

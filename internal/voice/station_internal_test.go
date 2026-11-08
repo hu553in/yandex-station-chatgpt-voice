@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ func wireBytes(data []byte, number protowire.Number, value []byte) []byte {
 
 func framedIPC(kind uint64, payload []byte) []byte {
 	body := wireInt(wireBytes(nil, 252, payload), 253, kind)
+	//nolint:gosec // Fixture indices and payload lengths are bounded by the literal test cases.
 	return append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...)
 }
 
@@ -81,8 +83,10 @@ func TestStationWireValidation(t *testing.T) {
 		t.Fatal("Alice listener missed", err)
 	}
 	for _, bad := range [][]byte{wireBytes(nil, 2, wireInt(nil, 1, 0)), wireInt(nil, 1, 0), wireInt(wireInt(nil, 1, 0), 2, 0)} {
-		payload := wireBytes(wireBytes(nil, 7, []byte("AliceCapability")), 18, bad)
-		if _, err := decodeNativeEvent(ipcEnvelope{kind: 210, payload: payload}); err == nil {
+		badListenerPayload := wireBytes(wireBytes(nil, 7, []byte("AliceCapability")), 18, bad)
+		if _, decodeNativeEventErr := decodeNativeEvent(
+			ipcEnvelope{kind: 210, payload: badListenerPayload},
+		); decodeNativeEventErr == nil {
 			t.Fatal("malformed Alice listener accepted")
 		}
 	}
@@ -122,7 +126,7 @@ func TestGateRevokesBeforeCleanupAndRejectsLateWake(t *testing.T) {
 	if g.activate(e) == nil || g.begin(t.Context()) != nil {
 		t.Fatal("late detector or new call escaped before cleanup")
 	}
-	g.finish(e, nil)
+	_ = g.finish(e, nil)
 	next := g.begin(t.Context())
 	if next == nil || next.number == e.number || g.activate(next) != nil {
 		t.Fatal("fresh epoch did not rearm after cleanup")
@@ -188,7 +192,7 @@ func TestStationRearmsAfterCallFailureAndWaitsForAlice(t *testing.T) {
 			return nil
 		})
 	}()
-	t.Cleanup(func() { cancel(); server.Close(); <-returned })
+	t.Cleanup(func() { cancel(); _ = server.Close(); <-returned })
 	state := func(value uint64) {
 		t.Helper()
 		if _, err := server.Write(framedIPC(3, wireInt(nil, 1, value))); err != nil {
@@ -250,13 +254,18 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 					if status == 200 {
 						body = "v=0\r\ns=offline\r\n"
 					}
-					return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewBufferString(body)), Header: make(http.Header), Request: req}, nil
+					return &http.Response{
+						StatusCode: status,
+						Body:       io.NopCloser(bytes.NewBufferString(body)),
+						Header:     make(http.Header),
+						Request:    req,
+					}, nil
 				})}
 				var controlFailure error
 				var controlPeer *peer
 				if status == 200 {
-					a, b := localPeer(t, ctx), localPeer(t, ctx)
-					connectLocalPeers(t, ctx, a, b)
+					a, b := localPeer(ctx, t), localPeer(ctx, t)
+					connectLocalPeers(ctx, t, a, b)
 					if err := b.dc.SendText(`{"type":"error","message":"private-rejection-body"}`); err != nil {
 						t.Fatal(err)
 					}
@@ -347,10 +356,13 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 					t.Fatal("detection rearm made a new signaling request")
 				}
 				cancel()
+				//nolint:errorlint // Only the exact sentinel is benign; wrapped or joined failures must remain failures.
 				if err := <-done; err != context.Canceled {
 					t.Fatal("successful cleanup did not preserve bare cancellation", err)
 				}
-				if !bytes.Contains(output.Bytes(), []byte("Voice attempt failed")) || bytes.Contains(output.Bytes(), []byte("private")) || bytes.Contains(output.Bytes(), []byte("ended normally")) {
+				if !bytes.Contains(output.Bytes(), []byte("Voice attempt failed")) ||
+					bytes.Contains(output.Bytes(), []byte("private")) ||
+					bytes.Contains(output.Bytes(), []byte("ended normally")) {
 					t.Fatal("rejection was hidden, classified as success, or disclosed", output.String())
 				}
 			})
@@ -360,7 +372,7 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 
 func TestStationExpectedCancellationIsQuiet(t *testing.T) {
 	for _, parentCanceled := range []bool{false, true} {
-		t.Run(fmt.Sprint(parentCanceled), func(t *testing.T) {
+		t.Run(strconv.FormatBool(parentCanceled), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			client, server := net.Pipe()
@@ -378,7 +390,7 @@ func TestStationExpectedCancellationIsQuiet(t *testing.T) {
 					return nil
 				})
 			}()
-			t.Cleanup(func() { cancel(); server.Close() })
+			t.Cleanup(func() { cancel(); _ = server.Close() })
 			if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
 				t.Fatal(err)
 			}
@@ -405,6 +417,7 @@ func TestStationExpectedCancellationIsQuiet(t *testing.T) {
 				}
 			}
 			cancel()
+			//nolint:errorlint // Only the exact sentinel is benign; wrapped or joined failures must remain failures.
 			if err := <-done; err != context.Canceled {
 				t.Fatal("parent cancellation did not remain bare", err)
 			}
@@ -465,6 +478,7 @@ func TestStationCleanupSurvivesAliceAndParentCancellation(t *testing.T) {
 	}
 }
 
+//nolint:errorlint // Exact sentinel identity distinguishes benign cancellation from wrapped or joined failures.
 func TestCompletionCueDiagnostic(t *testing.T) {
 	for _, cueErr := range []error{errors.New("cannot play voice cue: executable missing"), context.DeadlineExceeded, errAlicePriority, context.Canceled} {
 		t.Run(cueErr.Error(), func(t *testing.T) {
@@ -568,7 +582,7 @@ func TestStationAliceTakeoverCleanupFaultIsTerminal(t *testing.T) {
 		})
 		done <- got
 	}()
-	t.Cleanup(func() { cancel(); server.Close(); <-returned })
+	t.Cleanup(func() { cancel(); _ = server.Close(); <-returned })
 	if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +632,7 @@ func TestCompletionEpochHandoff(t *testing.T) {
 			cue := g.completion(ctx, old)
 			if action != "protocol hangup" {
 				if cue != nil {
-					g.finish(cue, nil)
+					_ = g.finish(cue, nil)
 					t.Fatal("completion escaped takeover or cancellation")
 				}
 				return
@@ -627,8 +641,9 @@ func TestCompletionEpochHandoff(t *testing.T) {
 				t.Fatal("confirmed hangup prevented completion cue")
 			}
 			defer g.finish(cue, nil)
-			g.finish(old, nil)
-			if !cue.allowed() || cue.number == old.number || old.allowed() || g.activate(old) == nil || g.completion(ctx, old) != nil {
+			_ = g.finish(old, nil)
+			if !cue.allowed() || cue.number == old.number || old.allowed() || g.activate(old) == nil ||
+				g.completion(ctx, old) != nil {
 				t.Fatal("completion did not transfer ownership exclusively")
 			}
 			g.observe(nativeEvent{activation: true})
@@ -665,7 +680,7 @@ func TestStationCompletionYieldsToAliceAndRearms(t *testing.T) {
 			return context.Cause(cue)
 		})
 	}()
-	t.Cleanup(func() { cancel(); server.Close(); <-returned })
+	t.Cleanup(func() { cancel(); _ = server.Close(); <-returned })
 	state := func(value uint64) {
 		t.Helper()
 		if _, err := server.Write(framedIPC(3, wireInt(nil, 1, value))); err != nil {
@@ -747,7 +762,7 @@ func TestQuietAliceAndTransportEOF(t *testing.T) {
 	if !e.allowed() {
 		t.Fatal("quiet Alice IDLE was treated as a missing heartbeat")
 	}
-	server.Close()
+	_ = server.Close()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -769,6 +784,7 @@ func TestCapturePhasesDiscardWakeAndConnectingAudio(t *testing.T) {
 		t.Helper()
 		pcm := make([]byte, samples*2)
 		for i := range samples {
+			//nolint:gosec // PCM uses the same 16 bits for signed samples and little-endian words.
 			binary.LittleEndian.PutUint16(pcm[i*2:], uint16(value))
 		}
 		if err := c.pushPCM(pcm); err != nil {
@@ -813,8 +829,8 @@ func TestCapturePhasesDiscardWakeAndConnectingAudio(t *testing.T) {
 		t.Fatal("live capture overflow did not end attempt", err)
 	}
 	for i := range captureQueueFrames {
-		frame := <-c.input
-		if frame.epoch != 7 || frame.sequence != uint64(i+2) || frame.pcm != [captureSamples]int16{} {
+		nextFrame := <-c.input
+		if nextFrame.epoch != 7 || nextFrame.sequence != uint64(i+2) || nextFrame.pcm != [captureSamples]int16{} {
 			t.Fatal("live capture was overwritten or reordered")
 		}
 	}
@@ -880,8 +896,8 @@ func TestProcessedCaptureAssemblyAndCancellation(t *testing.T) {
 		frame := framedIPC(158, audioPayload(part, 16000, 1))
 		for len(frame) > 0 {
 			n := min(len(frame), 7)
-			if _, err := server.Write(frame[:n]); err != nil {
-				t.Fatal(err)
+			if _, writeErr := server.Write(frame[:n]); writeErr != nil {
+				t.Fatal(writeErr)
 			}
 			frame = frame[n:]
 		}
@@ -911,13 +927,19 @@ func TestProcessedCaptureAssemblyAndCancellation(t *testing.T) {
 		pcm          []byte
 		rate, format uint64
 	}{{[]byte{0}, 16000, 1}, {nil, 48000, 1}, {nil, 16000, 2}} {
-		if err := decodeAudio(ipcEnvelope{kind: 158, payload: audioPayload(tc.pcm, tc.rate, tc.format)}, func([]byte) error { return nil }); err == nil {
+		if decodeAudioErr := decodeAudio(
+			ipcEnvelope{kind: 158, payload: audioPayload(tc.pcm, tc.rate, tc.format)},
+			func([]byte) error { return nil },
+		); decodeAudioErr == nil {
 			t.Fatal("invalid capture format accepted")
 		}
 	}
 	bad := wireBytes(wireBytes(nil, 2, []byte("vqe_0")), 3, nil)
 	bad = wireBytes(wireInt(bad, 8, 1), 7, nil)
-	if err := decodeAudio(ipcEnvelope{kind: 158, payload: wireBytes(nil, 1, bad)}, func([]byte) error { return nil }); err == nil {
+	if innerDecodeAudioErr := decodeAudio(
+		ipcEnvelope{kind: 158, payload: wireBytes(nil, 1, bad)},
+		func([]byte) error { return nil },
+	); innerDecodeAudioErr == nil {
 		t.Fatal("wrong audio field wire type accepted")
 	}
 }
@@ -946,8 +968,8 @@ func TestModelOverlayIsPrivateAndLeavesStockUntouched(t *testing.T) {
 		t.Fatal("stock flags modified")
 	}
 	for _, name := range []string{"words.txt", "acoustic_model.nnet"} {
-		link, err := os.Readlink(filepath.Join(dir, name))
-		if err != nil || link != filepath.Join(stock, name) {
+		link, readlinkErr := os.Readlink(filepath.Join(dir, name))
+		if readlinkErr != nil || link != filepath.Join(stock, name) {
 			t.Fatal("wrong stock model link")
 		}
 	}

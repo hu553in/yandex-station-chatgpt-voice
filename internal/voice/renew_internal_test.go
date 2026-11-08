@@ -34,10 +34,15 @@ func sessionServer(t *testing.T, handler http.HandlerFunc) *http.Client {
 		t.Fatal(err)
 	}
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "chatgpt.com"}, DNSNames: []string{"chatgpt.com"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true, IsCA: true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "chatgpt.com"},
+		DNSNames:              []string{"chatgpt.com"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
@@ -65,7 +70,9 @@ func sessionServer(t *testing.T, handler http.HandlerFunc) *http.Client {
 }
 
 func tokenExpiring(after time.Duration) string {
-	return syntheticJWT(fmt.Sprintf(`{"exp":%d,"email":"private-marker@example.invalid"}`, time.Now().Add(after).Unix()))
+	return syntheticJWT(
+		fmt.Sprintf(`{"exp":%d,"email":"private-marker@example.invalid"}`, time.Now().Add(after).Unix()),
+	)
 }
 
 func sessionResponse(w http.ResponseWriter, token string, setCookies ...string) {
@@ -73,7 +80,11 @@ func sessionResponse(w http.ResponseWriter, token string, setCookies ...string) 
 		w.Header().Add("Set-Cookie", c)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"user":{"email":"private-marker@example.invalid"},"expires":"2100-01-01T00:00:00Z","accessToken":%q}`, token)
+	_, _ = fmt.Fprintf(
+		w,
+		`{"user":{"email":"private-marker@example.invalid"},"expires":"2100-01-01T00:00:00Z","accessToken":%q}`,
+		token,
+	)
 }
 
 func savedSession(t *testing.T, s webSession) (string, []byte) {
@@ -110,6 +121,7 @@ func assertUnlocked(t *testing.T, path string) {
 
 type lockWaitContext struct {
 	context.Context
+
 	once    sync.Once
 	waiting chan struct{}
 }
@@ -158,7 +170,11 @@ func TestRenewalThreshold(t *testing.T) {
 func TestRotateFamily(t *testing.T) {
 	now := time.Now()
 	base := []sessionCookie{{Name: sessionCookieName, Value: "old-base"}}
-	chunks := []sessionCookie{{Name: sessionCookieName + ".0", Value: "old-0"}, {Name: sessionCookieName + ".1", Value: "old-1"}, {Name: sessionCookieName + ".2", Value: "old-2"}}
+	chunks := []sessionCookie{
+		{Name: sessionCookieName + ".0", Value: "old-0"},
+		{Name: sessionCookieName + ".1", Value: "old-1"},
+		{Name: sessionCookieName + ".2", Value: "old-2"},
+	}
 	family := func(values ...string) []sessionCookie {
 		if len(values) == 1 {
 			return []sessionCookie{{Name: sessionCookieName, Value: values[0]}}
@@ -198,6 +214,7 @@ func TestRotateFamily(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := rotateFamily(tc.old, tc.header, now)
+			//nolint:errorlint // The contract returns this sentinel unwrapped; assert exact identity.
 			if err != tc.err || !slices.Equal(got, tc.want) {
 				t.Fatalf("got %v %v", got, err)
 			}
@@ -213,12 +230,25 @@ func TestSessionForCallRenewsOnlyWhenNeeded(t *testing.T) {
 	client := sessionServer(t, func(w http.ResponseWriter, r *http.Request) {
 		n := requests.Add(1)
 		headers.Store(n, r.Header.Clone())
-		if r.Method != http.MethodGet || r.Host != "chatgpt.com" || r.URL.Path != "/api/auth/session" || r.URL.RawQuery != "" {
+		if r.Method != http.MethodGet || r.Host != "chatgpt.com" || r.URL.Path != "/api/auth/session" ||
+			r.URL.RawQuery != "" {
 			t.Error("renewal reached the wrong endpoint")
 		}
-		sessionResponse(w, tokenExpiring(time.Duration(lifetime.Load())), fmt.Sprintf("%s=rotated-%d; Path=/; Secure; HttpOnly", sessionCookieName, n), "cf_clearance=edge-private-marker; Path=/")
+		sessionResponse(
+			w,
+			tokenExpiring(time.Duration(lifetime.Load())),
+			fmt.Sprintf("%s=rotated-%d; Path=/; Secure; HttpOnly", sessionCookieName, n),
+			"cf_clearance=edge-private-marker; Path=/",
+		)
 	})
-	path, _ := savedSession(t, webSession{AccessToken: tokenExpiring(2 * renewWithin), DeviceID: "offline-device", Cookies: []sessionCookie{{Name: sessionCookieName, Value: "initial"}}})
+	path, _ := savedSession(
+		t,
+		webSession{
+			AccessToken: tokenExpiring(2 * renewWithin),
+			DeviceID:    "offline-device",
+			Cookies:     []sessionCookie{{Name: sessionCookieName, Value: "initial"}},
+		},
+	)
 	var logs bytes.Buffer
 	report := log.New(&logs, "", 0)
 	call := func(wantRequests int32) credential {
@@ -239,8 +269,8 @@ func TestSessionForCallRenewsOnlyWhenNeeded(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale.AccessToken = tokenExpiring(renewWithin)
-	if err := writeSessionFile(path, stale); err != nil {
-		t.Fatal(err)
+	if writeSessionFileErr := writeSessionFile(path, stale); writeSessionFileErr != nil {
+		t.Fatal(writeSessionFileErr)
 	}
 	first := call(1)
 	if first.DeviceID != "offline-device" {
@@ -264,7 +294,9 @@ func TestSessionForCallRenewsOnlyWhenNeeded(t *testing.T) {
 			t.Fatal("renewal sent the stale access token")
 		}
 	}
-	if strings.Count(logs.String(), "Renewing ChatGPT web session before the call.\n") != 3 || strings.Contains(logs.String(), "private-marker") || strings.Contains(logs.String(), "eyJ") {
+	if strings.Count(logs.String(), "Renewing ChatGPT web session before the call.\n") != 3 ||
+		strings.Contains(logs.String(), "private-marker") ||
+		strings.Contains(logs.String(), "eyJ") {
 		t.Fatal("renewal log was missing or disclosed private data", logs.String())
 	}
 }
@@ -275,24 +307,26 @@ func TestRenewalResponses(t *testing.T) {
 		handler http.HandlerFunc
 		want    string
 	}{
-		{"signed out", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, `{}`) }, "ended the saved web session"},
-		{"empty token", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, `{"accessToken":""}`) }, "ended the saved web session"},
-		{"malformed", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, `{"accessToken":"private-marker`) }, "invalid response"},
-		{"duplicate token", func(w http.ResponseWriter, _ *http.Request) {
-			io.WriteString(w, `{"accessToken":"private-marker-a","accessToken":"private-marker-b"}`)
+		{"signed out", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }, "ended the saved web session"},
+		{"empty token", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"accessToken":""}`) }, "ended the saved web session"},
+		{"malformed", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"accessToken":"private-marker`)
 		}, "invalid response"},
-		{"non-string token", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, `{"accessToken":42}`) }, "invalid response"},
+		{"duplicate token", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"accessToken":"private-marker-a","accessToken":"private-marker-b"}`)
+		}, "invalid response"},
+		{"non-string token", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"accessToken":42}`) }, "invalid response"},
 		{"API key", func(w http.ResponseWriter, _ *http.Request) { sessionResponse(w, "sk-private-marker") }, "invalid access token"},
 		{"expired token", func(w http.ResponseWriter, _ *http.Request) {
 			sessionResponse(w, syntheticJWT(`{"exp":1,"email":"private-marker"}`))
 		}, "expired access token"},
 		{"unauthorized", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
-			io.WriteString(w, "private-marker")
+			_, _ = io.WriteString(w, "private-marker")
 		}, "rejected the saved web session (HTTP 401)"},
 		{"forbidden", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusForbidden)
-			io.WriteString(w, `{"detail":"private-marker"}`)
+			_, _ = io.WriteString(w, `{"detail":"private-marker"}`)
 		}, "rejected the saved web session (HTTP 403)"},
 		{"edge challenge", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Cf-Mitigated", "challenge")
@@ -300,14 +334,14 @@ func TestRenewalResponses(t *testing.T) {
 		}, "edge challenged session renewal from the Station's network (HTTP 403)"},
 		{"HTML", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			io.WriteString(w, "<html>private-marker</html>")
+			_, _ = io.WriteString(w, "<html>private-marker</html>")
 		}, "edge challenged session renewal from the Station's network (HTTP 200)"},
 		{"redirect", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "https://chatgpt.com/auth/login?next=private-marker", http.StatusFound)
 		}, "unexpected redirect (HTTP 302)"},
 		{"server error", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) }, "HTTP 502"},
 		{"oversized", func(w http.ResponseWriter, _ *http.Request) {
-			io.WriteString(w, `{"accessToken":"`+strings.Repeat("a", maxSessionResponseBytes)+`"}`)
+			_, _ = io.WriteString(w, `{"accessToken":"`+strings.Repeat("a", maxSessionResponseBytes)+`"}`)
 		}, "exceeds 256 KiB"},
 		{"oversized headers", func(w http.ResponseWriter, _ *http.Request) {
 			for i := range 80 {
@@ -316,7 +350,7 @@ func TestRenewalResponses(t *testing.T) {
 		}, "HTTPS request failed"},
 		{"truncated body", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Length", "1000")
-			io.WriteString(w, `{"accessToken":"private-marker`)
+			_, _ = io.WriteString(w, `{"accessToken":"private-marker`)
 		}, "cannot read ChatGPT session renewal response"},
 		{"signed out by cookies", func(w http.ResponseWriter, _ *http.Request) {
 			sessionResponse(w, tokenExpiring(2*renewWithin), sessionCookieName+"=; Max-Age=0; Path=/")
@@ -337,7 +371,8 @@ func TestRenewalResponses(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want %q", err, tc.want)
 			}
-			if strings.Contains(err.Error()+logs.String(), "private") || strings.Contains(err.Error()+logs.String(), "eyJ") {
+			if strings.Contains(err.Error()+logs.String(), "private") ||
+				strings.Contains(err.Error()+logs.String(), "eyJ") {
 				t.Fatal("renewal failure disclosed private data", err)
 			}
 			if requests.Load() != 1 {
@@ -365,6 +400,7 @@ func TestRenewalRejectsUntrustedTLS(t *testing.T) {
 	assertFileBytes(t, path, before)
 }
 
+//nolint:errorlint // Exact sentinel identity distinguishes benign cancellation from wrapped or joined failures.
 func TestRenewalCancellation(t *testing.T) {
 	t.Run("lock wait", func(t *testing.T) {
 		var requests atomic.Int32
@@ -377,13 +413,13 @@ func TestRenewalCancellation(t *testing.T) {
 		ctx, cancel := waitingContext(t.Context())
 		done := make(chan error, 1)
 		go func() {
-			_, err := sessionForCall(ctx, path, client, log.New(io.Discard, "", 0))
-			done <- err
+			_, sessionForCallErr := sessionForCall(ctx, path, client, log.New(io.Discard, "", 0))
+			done <- sessionForCallErr
 		}()
 		<-ctx.waiting
 		cancel(errAlicePriority)
-		if err := <-done; err != errAlicePriority {
-			t.Fatal("lock wait did not return the exact Alice cause", err)
+		if renewalErr := <-done; renewalErr != errAlicePriority {
+			t.Fatal("lock wait did not return the exact Alice cause", renewalErr)
 		}
 		unlock()
 		if requests.Load() != 0 {
@@ -396,7 +432,7 @@ func TestRenewalCancellation(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
 		defer close(release)
-		client := sessionServer(t, func(w http.ResponseWriter, r *http.Request) {
+		client := sessionServer(t, func(_ http.ResponseWriter, r *http.Request) {
 			close(started)
 			select {
 			case <-r.Context().Done():
@@ -421,7 +457,7 @@ func TestRenewalCancellation(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		release := make(chan struct{})
 		defer close(release)
-		client := sessionServer(t, func(w http.ResponseWriter, r *http.Request) {
+		client := sessionServer(t, func(_ http.ResponseWriter, r *http.Request) {
 			select {
 			case <-r.Context().Done():
 			case <-release:
@@ -438,7 +474,13 @@ func TestRenewalCancellation(t *testing.T) {
 	t.Run("after decoded response", func(t *testing.T) {
 		renewed := tokenExpiring(2 * renewWithin)
 		client := sessionServer(t, func(w http.ResponseWriter, _ *http.Request) {
-			sessionResponse(w, renewed, sessionCookieName+".0=rotated-0; Path=/", sessionCookieName+".1=rotated-1; Path=/", sessionCookieName+"=; Max-Age=0; Path=/")
+			sessionResponse(
+				w,
+				renewed,
+				sessionCookieName+".0=rotated-0; Path=/",
+				sessionCookieName+".1=rotated-1; Path=/",
+				sessionCookieName+"=; Max-Age=0; Path=/",
+			)
 		})
 		ctx, cancel := context.WithCancelCause(t.Context())
 		base := client.Transport
@@ -454,7 +496,10 @@ func TestRenewalCancellation(t *testing.T) {
 			t.Fatal("post-response cancellation lost its exact cause", err)
 		}
 		saved, err := readSessionFile(path)
-		want := []sessionCookie{{Name: sessionCookieName + ".0", Value: "rotated-0"}, {Name: sessionCookieName + ".1", Value: "rotated-1"}}
+		want := []sessionCookie{
+			{Name: sessionCookieName + ".0", Value: "rotated-0"},
+			{Name: sessionCookieName + ".1", Value: "rotated-1"},
+		}
 		if err != nil || saved.AccessToken != renewed || !slices.Equal(saved.Cookies, want) {
 			t.Fatal("completed rotation was not persisted before reporting cancellation", err)
 		}
@@ -464,6 +509,7 @@ func TestRenewalCancellation(t *testing.T) {
 
 type eofHook struct {
 	io.ReadCloser
+
 	atEOF func()
 }
 
@@ -486,7 +532,10 @@ func TestImportBrowserSession(t *testing.T) {
 	renewed := tokenExpiring(2 * renewWithin)
 	client := sessionServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if got := r.Header.Values("Cookie"); len(got) != 1 || got[0] != sessionCookieName+".0=synthetic-golden-chunk-0; "+sessionCookieName+".1=synthetic-golden-chunk-1" {
+		if got := r.Header.Values(
+			"Cookie",
+		); len(got) != 1 ||
+			got[0] != sessionCookieName+".0=synthetic-golden-chunk-0; "+sessionCookieName+".1=synthetic-golden-chunk-1" {
 			t.Errorf("import sent cookies %q", got)
 		}
 		if code := int(status.Load()); code != http.StatusOK {
@@ -497,23 +546,37 @@ func TestImportBrowserSession(t *testing.T) {
 	})
 	dir := filepath.Join(t.TempDir(), "app")
 	path := filepath.Join(dir, "session.json")
-	if err := importBrowserSession(t.Context(), path, client, bytes.NewReader(transfer)); err != nil {
-		t.Fatal(err)
+	if importBrowserSessionErr := importBrowserSession(
+		t.Context(),
+		path,
+		client,
+		bytes.NewReader(transfer),
+	); importBrowserSessionErr != nil {
+		t.Fatal(importBrowserSessionErr)
 	}
 	first, err := readSessionFile(path)
 	if err != nil || first.AccessToken != renewed || !validDeviceID(first.DeviceID) || len(first.Cookies) != 2 {
 		t.Fatal("first sign-in did not save a renewed session", err)
 	}
 	for name, mode := range map[string]os.FileMode{dir: 0700, path: 0600} {
-		if info, err := os.Stat(name); err != nil || info.Mode().Perm() != mode {
-			t.Fatalf("permissions %s %v", name, err)
+		if info, statErr := os.Stat(name); statErr != nil || info.Mode().Perm() != mode {
+			t.Fatalf("permissions %s %v", name, statErr)
 		}
 	}
-	if err := os.WriteFile(path, []byte(`{"accessToken":"synthetic-private-token","deviceId":"legacy-device"}`), 0600); err != nil {
-		t.Fatal(err)
+	if writeFileErr := os.WriteFile(
+		path,
+		[]byte(`{"accessToken":"synthetic-private-token","deviceId":"legacy-device"}`),
+		0600,
+	); writeFileErr != nil {
+		t.Fatal(writeFileErr)
 	}
-	if err := importBrowserSession(t.Context(), path, client, bytes.NewReader(transfer)); err != nil {
-		t.Fatal(err)
+	if repeatImportErr := importBrowserSession(
+		t.Context(),
+		path,
+		client,
+		bytes.NewReader(transfer),
+	); repeatImportErr != nil {
+		t.Fatal(repeatImportErr)
 	}
 	upgraded, err := readSessionFile(path)
 	if err != nil || upgraded.DeviceID != "legacy-device" || upgraded.AccessToken != renewed {
@@ -524,8 +587,14 @@ func TestImportBrowserSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	status.Store(http.StatusForbidden)
-	if err := importBrowserSession(t.Context(), path, client, bytes.NewReader(transfer)); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
-		t.Fatal("rejected sign-in was accepted", err)
+	if innerImportBrowserSessionErr := importBrowserSession(
+		t.Context(),
+		path,
+		client,
+		bytes.NewReader(transfer),
+	); innerImportBrowserSessionErr == nil ||
+		!strings.Contains(innerImportBrowserSessionErr.Error(), "HTTP 403") {
+		t.Fatal("rejected sign-in was accepted", innerImportBrowserSessionErr)
 	}
 	assertFileBytes(t, path, before)
 	accepted := requests.Load()
@@ -540,8 +609,14 @@ func TestImportBrowserSession(t *testing.T) {
 		"invalid octet":    `{"cookies":[{"name":"` + sessionCookieName + `","value":"a;b"}]}`,
 		"oversized":        strings.Repeat(" ", maxCredentialBytes+1),
 	} {
-		if err := importBrowserSession(t.Context(), path, client, strings.NewReader(input)); err == nil || strings.Contains(err.Error(), "synthetic-private") {
-			t.Fatalf("%s: invalid transfer accepted or disclosed: %v", name, err)
+		if innerInnerImportBrowserSessionErr := importBrowserSession(
+			t.Context(),
+			path,
+			client,
+			strings.NewReader(input),
+		); innerInnerImportBrowserSessionErr == nil ||
+			strings.Contains(innerInnerImportBrowserSessionErr.Error(), "synthetic-private") {
+			t.Fatalf("%s: invalid transfer accepted or disclosed: %v", name, innerInnerImportBrowserSessionErr)
 		}
 	}
 	if requests.Load() != accepted {
@@ -561,9 +636,11 @@ func TestImportAndRenewalCannotLoseLogin(t *testing.T) {
 	newLogin := func(r *http.Request) bool { return strings.Contains(r.Header.Get("Cookie"), "synthetic-golden-chunk") }
 	assertLogin := func(t *testing.T, path string) {
 		t.Helper()
-		saved, err := readSessionFile(path)
-		if err != nil || saved.AccessToken != loginToken || saved.Cookies[0].Value != "synthetic-golden-chunk-0" || saved.DeviceID != "offline-device" {
-			t.Fatal("the new sign-in was lost", err)
+		saved, readSessionFileErr := readSessionFile(path)
+		if readSessionFileErr != nil || saved.AccessToken != loginToken ||
+			saved.Cookies[0].Value != "synthetic-golden-chunk-0" ||
+			saved.DeviceID != "offline-device" {
+			t.Fatal("the new sign-in was lost", readSessionFileErr)
 		}
 	}
 	t.Run("renewal first", func(t *testing.T) {
@@ -584,8 +661,8 @@ func TestImportAndRenewalCannotLoseLogin(t *testing.T) {
 		path, _ := savedSession(t, syntheticSession(tokenExpiring(time.Hour)))
 		renewal := make(chan error, 1)
 		go func() {
-			_, err := sessionForCall(t.Context(), path, client, log.New(io.Discard, "", 0))
-			renewal <- err
+			_, sessionForCallErr := sessionForCall(t.Context(), path, client, log.New(io.Discard, "", 0))
+			renewal <- sessionForCallErr
 		}()
 		<-renewalStarted
 		ctx, cancel := waitingContext(t.Context())
@@ -594,11 +671,11 @@ func TestImportAndRenewalCannotLoseLogin(t *testing.T) {
 		go func() { login <- importBrowserSession(ctx, path, client, bytes.NewReader(transfer)) }()
 		<-ctx.waiting
 		close(releaseRenewal)
-		if err := <-renewal; err != nil {
-			t.Fatal(err)
+		if operationErr := <-renewal; operationErr != nil {
+			t.Fatal(operationErr)
 		}
-		if err := <-login; err != nil {
-			t.Fatal(err)
+		if completionErr := <-login; completionErr != nil {
+			t.Fatal(completionErr)
 		}
 		if oldRequests.Load() != 1 || loginRequests.Load() != 1 {
 			t.Fatal("unexpected renewal requests")
@@ -631,13 +708,13 @@ func TestImportAndRenewalCannotLoseLogin(t *testing.T) {
 		}
 		renewal := make(chan result, 1)
 		go func() {
-			auth, err := sessionForCall(ctx, path, client, log.New(io.Discard, "", 0))
-			renewal <- result{auth, err}
+			auth, waitingCallErr := sessionForCall(ctx, path, client, log.New(io.Discard, "", 0))
+			renewal <- result{auth, waitingCallErr}
 		}()
 		<-ctx.waiting
 		close(releaseLogin)
-		if err := <-login; err != nil {
-			t.Fatal(err)
+		if terminalErr := <-login; terminalErr != nil {
+			t.Fatal(terminalErr)
 		}
 		got := <-renewal
 		if got.err != nil || got.auth.AccessToken != loginToken || oldRequests.Load() != 0 {
@@ -654,7 +731,7 @@ func TestRunCallRenewsBeforeMedia(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
 		defer close(release)
-		client := sessionServer(t, func(w http.ResponseWriter, r *http.Request) {
+		client := sessionServer(t, func(_ http.ResponseWriter, r *http.Request) {
 			close(started)
 			select {
 			case <-r.Context().Done():
@@ -669,13 +746,17 @@ func TestRunCallRenewsBeforeMedia(t *testing.T) {
 		go func() { done <- runCall(e, path, newStationCapture(e), sessionSettings{}) }()
 		<-started
 		e.revoke(errAlicePriority)
+		//nolint:errorlint // Only the exact sentinel is benign; wrapped or joined failures must remain failures.
 		if err := <-done; err != errAlicePriority {
 			t.Fatal("Alice during renewal was not returned unmarked", err)
 		}
 		assertFileBytes(t, path, before)
 	})
 	t.Run("rejected renewal", func(t *testing.T) {
-		client := sessionServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) })
+		client := sessionServer(
+			t,
+			func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) },
+		)
 		callClient = func() *http.Client { return client }
 		path, _ := savedSession(t, syntheticSession(tokenExpiring(time.Hour)))
 		var logs bytes.Buffer

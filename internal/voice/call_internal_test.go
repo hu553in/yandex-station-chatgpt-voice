@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,10 @@ func (f answerReadFunc) Read(data []byte) (int, error) { return f(data) }
 func TestFixedOriginSignalingAndFailures(t *testing.T) {
 	const private = "synthetic-private-token"
 	auth := credential{AccessToken: private, DeviceID: "offline-device"}
-	session, err := encodeSession(time.Now(), sessionSettings{Voice: " voice\n$custom ", BackendModel: "-future/модель", BackendThinkingEffort: "disabled"})
+	session, err := encodeSession(
+		time.Now(),
+		sessionSettings{Voice: " voice\n$custom ", BackendModel: "-future/модель", BackendThinkingEffort: "disabled"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,32 +66,34 @@ func TestFixedOriginSignalingAndFailures(t *testing.T) {
 			requests := 0
 			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				requests++
-				if req.URL.String() != signalingURL || req.Method != "POST" {
+				if req.URL.String() != signalingURL || req.Method != http.MethodPost {
 					t.Fatal("wrong signaling destination")
 				}
-				if req.Header.Get("Authorization") != "Bearer "+private || req.Header.Get("Origin") != "https://chatgpt.com" || req.Header.Get("Oai-Device-Id") != auth.DeviceID {
+				if req.Header.Get("Authorization") != "Bearer "+private ||
+					req.Header.Get("Origin") != "https://chatgpt.com" ||
+					req.Header.Get("Oai-Device-Id") != auth.DeviceID {
 					t.Fatal("missing web authorization headers")
 				}
 				if req.Header.Get("X-Openai-Web-Frontend") != "" {
 					t.Fatal("unexpected frontend header")
 				}
-				_, params, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
-				if err != nil {
-					t.Fatal(err)
+				_, params, parseMediaTypeErr := mime.ParseMediaType(req.Header.Get("Content-Type"))
+				if parseMediaTypeErr != nil {
+					t.Fatal(parseMediaTypeErr)
 				}
 				form := multipart.NewReader(req.Body, params["boundary"])
 				fields := map[string]string{}
 				for {
-					part, err := form.NextPart()
-					if errors.Is(err, io.EOF) {
+					part, nextPartErr := form.NextPart()
+					if errors.Is(nextPartErr, io.EOF) {
 						break
 					}
-					if err != nil {
-						t.Fatal(err)
+					if nextPartErr != nil {
+						t.Fatal(nextPartErr)
 					}
-					data, err := io.ReadAll(part)
-					if err != nil {
-						t.Fatal(err)
+					data, readPartErr := io.ReadAll(part)
+					if readPartErr != nil {
+						t.Fatal(readPartErr)
 					}
 					fields[part.FormName()] = string(data)
 				}
@@ -95,24 +101,30 @@ func TestFixedOriginSignalingAndFailures(t *testing.T) {
 					t.Fatal("incorrect multipart fields")
 				}
 				var payload map[string]any
-				if err := json.Unmarshal([]byte(fields["session"]), &payload); err != nil {
-					t.Fatal(err)
+				if unmarshalErr := json.Unmarshal([]byte(fields["session"]), &payload); unmarshalErr != nil {
+					t.Fatal(unmarshalErr)
 				}
-				if payload["voice"] != " voice\n$custom " || payload["backend_model"] != "-future/модель" || payload["backend_reasoning_effort"] != "instant" {
+				if payload["voice"] != " voice\n$custom " || payload["backend_model"] != "-future/модель" ||
+					payload["backend_reasoning_effort"] != "instant" {
 					t.Fatal("settings did not reach multipart")
 				}
 				if _, ok := payload["backend_thinking_effort"]; ok {
 					t.Fatal("disabled effort reached multipart")
 				}
-				return &http.Response{StatusCode: tc.status, Header: http.Header{"Location": []string{"https://example.invalid/steal"}}, Body: io.NopCloser(strings.NewReader(tc.body)), Request: req}, nil
+				return &http.Response{
+					StatusCode: tc.status,
+					Header:     http.Header{"Location": []string{"https://example.invalid/steal"}},
+					Body:       io.NopCloser(strings.NewReader(tc.body)),
+					Request:    req,
+				}, nil
 			})}
-			answer, err := exchangeOffer(t.Context(), client, auth, "v=0\r\ns=offer\r\n", session)
+			answer, exchangeOfferErr := exchangeOffer(t.Context(), client, auth, "v=0\r\ns=offer\r\n", session)
 			if tc.want == "" {
-				if err != nil || !strings.HasPrefix(answer, "v=0") {
-					t.Fatal("valid SDP failed", err)
+				if exchangeOfferErr != nil || !strings.HasPrefix(answer, "v=0") {
+					t.Fatal("valid SDP failed", exchangeOfferErr)
 				}
-			} else if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), private) {
-				t.Fatalf("unsafe or wrong error: %v", err)
+			} else if exchangeOfferErr == nil || !strings.Contains(exchangeOfferErr.Error(), tc.want) || strings.Contains(exchangeOfferErr.Error(), private) {
+				t.Fatalf("unsafe or wrong error: %v", exchangeOfferErr)
 			}
 			if requests != 1 {
 				t.Fatal("redirect or retry performed")
@@ -143,7 +155,9 @@ func TestSignalingCancellationAndTLSValidation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("signaling did not cancel")
 	}
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("request passed untrusted TLS") }))
+	server := httptest.NewUnstartedServer(
+		http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { t.Error("request passed untrusted TLS") }),
+	)
 	server.Config.ErrorLog = log.New(io.Discard, "", 0)
 	server.StartTLS()
 	defer server.Close()
@@ -151,7 +165,7 @@ func TestSignalingCancellationAndTLSValidation(t *testing.T) {
 	defer safe.CloseIdleConnections()
 	transport := safe.Transport.(*http.Transport)
 	transport.Proxy = nil
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
 	}
 	if _, err := exchangeOffer(t.Context(), safe, auth, "v=0\r\n", []byte(`{}`)); err == nil {
@@ -159,7 +173,7 @@ func TestSignalingCancellationAndTLSValidation(t *testing.T) {
 	}
 }
 
-func localPeer(t *testing.T, ctx context.Context) *peer {
+func localPeer(ctx context.Context, t *testing.T) *peer {
 	t.Helper()
 	var settings webrtc.SettingEngine
 	settings.SetIncludeLoopbackCandidate(true)
@@ -170,29 +184,33 @@ func localPeer(t *testing.T, ctx context.Context) *peer {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := p.close(); err != nil {
-			t.Error(err)
+		if closeErr := p.close(); closeErr != nil {
+			t.Error(closeErr)
 		}
 	})
 	return p
 }
 
-func connectLocalPeers(t *testing.T, ctx context.Context, a, b *peer) {
+func connectLocalPeers(ctx context.Context, t *testing.T, a, b *peer) {
 	t.Helper()
 	offer, err := a.offer(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(offer, "a=sendrecv") || !strings.Contains(offer, "opus/48000/2") || strings.Contains(offer, "PCMU/") || !strings.Contains(offer, "a=max-message-size:262144") {
+	if !strings.Contains(offer, "a=sendrecv") || !strings.Contains(offer, "opus/48000/2") ||
+		strings.Contains(offer, "PCMU/") ||
+		!strings.Contains(offer, "a=max-message-size:262144") {
 		t.Fatal("incorrect Opus-only offer")
 	}
-	if a.dc.Label() != "" || a.dc.ID() == nil || *a.dc.ID() != 0 || !a.dc.Ordered() || !a.dc.Negotiated() || a.dc.MaxRetransmits() != nil || a.dc.MaxPacketLifeTime() != nil {
+	if a.dc.Label() != "" || a.dc.ID() == nil || *a.dc.ID() != 0 || !a.dc.Ordered() || !a.dc.Negotiated() ||
+		a.dc.MaxRetransmits() != nil ||
+		a.dc.MaxPacketLifeTime() != nil {
 		t.Fatal("incorrect negotiated control channel")
 	}
-	answerLocalOffer(t, ctx, a, b, offer)
+	answerLocalOffer(ctx, t, a, b, offer)
 }
 
-func answerLocalOffer(t *testing.T, ctx context.Context, a, b *peer, offer string) {
+func answerLocalOffer(ctx context.Context, t *testing.T, a, b *peer, offer string) {
 	t.Helper()
 	var err error
 	if err = b.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
@@ -233,20 +251,26 @@ func TestCancellationDuringICEGathering(t *testing.T) {
 	settings.SetIncludeLoopbackCandidate(true)
 	settings.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-	p, err := newPeer(t.Context(), settings, []webrtc.ICEServer{{URLs: []string{"stun:" + blackhole.LocalAddr().String()}}}, log.New(io.Discard, "", 0), nil)
+	p, err := newPeer(
+		t.Context(),
+		settings,
+		[]webrtc.ICEServer{{URLs: []string{"stun:" + blackhole.LocalAddr().String()}}},
+		log.New(io.Discard, "", 0),
+		nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer p.close()
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	if offer, err := p.offer(ctx); err == nil || offer != "" {
+	if offer, offerErr := p.offer(ctx); offerErr == nil || offer != "" {
 		t.Fatal("unfinished ICE gathering returned a successful offer")
 	}
 }
 
 func TestCanceledOffer(t *testing.T) {
-	p := localPeer(t, t.Context())
+	p := localPeer(t.Context(), t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if offer, err := p.offer(ctx); err == nil || offer != "" {
@@ -257,13 +281,15 @@ func TestCanceledOffer(t *testing.T) {
 func TestRealDataChannelProtocol(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
-	a, b := localPeer(t, ctx), localPeer(t, ctx)
-	connectLocalPeers(t, ctx, a, b)
+	a, b := localPeer(ctx, t), localPeer(ctx, t)
+	connectLocalPeers(ctx, t, a, b)
 	response := testEnvelope(t, `{"type":"state_update","payload":{"new_state":"listening"}}`)
 	if err := b.dc.SendText(string(response)); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.dc.SendText(string(testEnvelope(t, `{"type":"tool_update","payload":{"update_type":"hang_up"}}`))); err != nil {
+	if err := b.dc.SendText(
+		string(testEnvelope(t, `{"type":"tool_update","payload":{"update_type":"hang_up"}}`)),
+	); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -292,11 +318,22 @@ func TestNativePriorityCancelsSignalingAndRejectsLateAnswer(t *testing.T) {
 		<-req.Context().Done()
 		close(canceled)
 		<-release
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("v=0\r\ns=late\r\n")), Header: make(http.Header), Request: req}, nil
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("v=0\r\ns=late\r\n")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
 	})}
 	done := make(chan struct{})
 	go func() {
-		_, _ = exchangeOffer(e.ctx, client, credential{AccessToken: "synthetic-token", DeviceID: "test-device"}, "v=0\r\n", []byte(`{}`))
+		_, _ = exchangeOffer(
+			e.ctx,
+			client,
+			credential{AccessToken: "synthetic-token", DeviceID: "test-device"},
+			"v=0\r\n",
+			[]byte(`{}`),
+		)
 		close(done)
 	}()
 	<-started
@@ -319,7 +356,15 @@ func TestNativePacketLossRecoveryAndFailure(t *testing.T) {
 		t.Run(map[bool]string{true: "recover", false: "fail"}[recoverPackets], func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			router, err := vnet.NewRouter(&vnet.RouterConfig{CIDR: "192.0.2.0/24", LoggerFactory: &logging.DefaultLoggerFactory{Writer: io.Discard, DefaultLogLevel: logging.LogLevelDisabled}})
+			router, err := vnet.NewRouter(
+				&vnet.RouterConfig{
+					CIDR: "192.0.2.0/24",
+					LoggerFactory: &logging.DefaultLoggerFactory{
+						Writer:          io.Discard,
+						DefaultLogLevel: logging.LogLevelDisabled,
+					},
+				},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,32 +372,32 @@ func TestNativePacketLossRecoveryAndFailure(t *testing.T) {
 			router.AddChunkFilter(func(vnet.Chunk) bool { return !drop.Load() })
 			var peers []*peer
 			for _, ip := range []string{"192.0.2.1", "192.0.2.2"} {
-				network, err := vnet.NewNet(&vnet.NetConfig{StaticIPs: []string{ip}})
-				if err != nil {
-					t.Fatal(err)
+				network, newNetErr := vnet.NewNet(&vnet.NetConfig{StaticIPs: []string{ip}})
+				if newNetErr != nil {
+					t.Fatal(newNetErr)
 				}
-				if err := router.AddNet(network); err != nil {
-					t.Fatal(err)
+				if addNetErr := router.AddNet(network); addNetErr != nil {
+					t.Fatal(addNetErr)
 				}
 				var settings webrtc.SettingEngine
 				settings.SetNet(network)
 				settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 				settings.SetICETimeouts(200*time.Millisecond, 2*time.Second, 30*time.Millisecond)
-				p, err := newPeer(ctx, settings, nil, log.New(io.Discard, "", 0), nil)
-				if err != nil {
-					t.Fatal(err)
+				p, newPeerErr := newPeer(ctx, settings, nil, log.New(io.Discard, "", 0), nil)
+				if newPeerErr != nil {
+					t.Fatal(newPeerErr)
 				}
 				peers = append(peers, p)
 			}
-			if err := router.Start(); err != nil {
-				t.Fatal(err)
+			if startErr := router.Start(); startErr != nil {
+				t.Fatal(startErr)
 			}
 			defer router.Stop()
 			for _, p := range peers {
 				defer p.close()
 			}
 			a, b := peers[0], peers[1]
-			connectLocalPeers(t, ctx, a, b)
+			connectLocalPeers(ctx, t, a, b)
 			originalPC, originalDC := a.pc, a.dc
 			waitState := func(p *peer, want webrtc.PeerConnectionState) {
 				t.Helper()
@@ -380,13 +425,15 @@ func TestNativePacketLossRecoveryAndFailure(t *testing.T) {
 					if p.ctx.Err() != nil {
 						t.Fatal("recovered peer canceled")
 					}
-					if err := p.dc.SendText(`{"type":"future_event","data":"after loss"}`); err != nil {
-						t.Fatal(err)
+					if sendTextErr := p.dc.SendText(`{"type":"future_event","data":"after loss"}`); sendTextErr != nil {
+						t.Fatal(sendTextErr)
 					}
 				}
 				for _, p := range peers {
-					if err := p.dc.SendText(`{"type":"tool_update","update_type":"hangup"}`); err != nil {
-						t.Fatal(err)
+					if hangupSendErr := p.dc.SendText(
+						`{"type":"tool_update","update_type":"hangup"}`,
+					); hangupSendErr != nil {
+						t.Fatal(hangupSendErr)
 					}
 				}
 				for _, p := range peers {
@@ -402,7 +449,9 @@ func TestNativePacketLossRecoveryAndFailure(t *testing.T) {
 				if a.pc != originalPC || a.dc != originalDC {
 					t.Fatal("recovery replaced the peer or channel")
 				}
-				t.Log("Packets dropped; both production peers stayed live through Disconnected; restored Connected and exchanged DC data on the original peers.")
+				t.Log(
+					"Packets dropped; both production peers stayed live through Disconnected; restored Connected and exchanged DC data on the original peers.",
+				)
 			} else {
 				for _, p := range peers {
 					waitState(p, webrtc.PeerConnectionStateFailed)
@@ -411,21 +460,27 @@ func TestNativePacketLossRecoveryAndFailure(t *testing.T) {
 					case <-ctx.Done():
 						t.Fatal("native Failed did not cancel")
 					}
-					if err := p.outcome(context.Cause(p.ctx)); err == nil || !strings.Contains(err.Error(), "connection lost") {
-						t.Fatal("failed loss was not reported", err)
+					if outcomeErr := p.outcome(
+						context.Cause(p.ctx),
+					); outcomeErr == nil ||
+						!strings.Contains(outcomeErr.Error(), "connection lost") {
+						t.Fatal("failed loss was not reported", outcomeErr)
 					}
 				}
-				t.Log("Packets remained blocked; native Failed canceled both production peers with a safe connection-loss error.")
+				t.Log(
+					"Packets remained blocked; native Failed canceled both production peers with a safe connection-loss error.",
+				)
 			}
 		})
 	}
 }
 
+//nolint:errorlint // Exact sentinel identity distinguishes benign cancellation from wrapped or joined failures.
 func TestReceivedErrorSurvivesRemoteClose(t *testing.T) {
 	for _, terminal := range []string{`{"type":"error","message":"private-marker"}`, `{"type":"usage_update","audio_s":0}`} {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		a, b := localPeer(t, ctx), localPeer(t, ctx)
-		connectLocalPeers(t, ctx, a, b)
+		a, b := localPeer(ctx, t), localPeer(ctx, t)
+		connectLocalPeers(ctx, t, a, b)
 		if err := b.dc.SendText(terminal); err != nil {
 			t.Fatal(err)
 		}
@@ -440,12 +495,23 @@ func TestReceivedErrorSurvivesRemoteClose(t *testing.T) {
 		a.cancel(errRemoteClosed)
 		setupCtx, stopSetup := context.WithCancelCause(ctx)
 		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Request: req, Body: io.NopCloser(answerReadFunc(func([]byte) (int, error) {
-				stopSetup(errRemoteClosed)
-				return 0, io.ErrUnexpectedEOF
-			}))}, nil
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Request:    req,
+				Body: io.NopCloser(answerReadFunc(func([]byte) (int, error) {
+					stopSetup(errRemoteClosed)
+					return 0, io.ErrUnexpectedEOF
+				})),
+			}, nil
 		})}
-		_, setupExit := exchangeOffer(setupCtx, client, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, "v=0\r\n", []byte(`{}`))
+		_, setupExit := exchangeOffer(
+			setupCtx,
+			client,
+			credential{AccessToken: "synthetic-token", DeviceID: "offline-device"},
+			"v=0\r\n",
+			[]byte(`{}`),
+		)
 		if setupExit != errRemoteClosed {
 			t.Fatal("signaling answer read masked the setup close cause", setupExit)
 		}
@@ -458,7 +524,8 @@ func TestReceivedErrorSurvivesRemoteClose(t *testing.T) {
 		}
 		for _, exit := range []error{setupExit, context.Cause(a.ctx)} {
 			result := a.outcome(exit)
-			if result == nil || !strings.Contains(result.Error(), want) || strings.Contains(result.Error(), "private-marker") {
+			if result == nil || !strings.Contains(result.Error(), want) ||
+				strings.Contains(result.Error(), "private-marker") {
 				t.Fatal("received failure lost or leaked", result)
 			}
 		}
@@ -467,7 +534,9 @@ func TestReceivedErrorSurvivesRemoteClose(t *testing.T) {
 		}
 		cancel()
 	}
-	t.Log("A terminal event survived closure; both signaling setup and active-call exit outcomes retained its sanitized failure.")
+	t.Log(
+		"A terminal event survived closure; both signaling setup and active-call exit outcomes retained its sanitized failure.",
+	)
 }
 
 type synchronizedOutput struct {
@@ -504,7 +573,7 @@ func TestIntentionalPeerShutdownIsQuiet(t *testing.T) {
 		peers = append(peers, p)
 		t.Cleanup(func() { _ = p.close() })
 	}
-	connectLocalPeers(t, ctx, peers[0], peers[1])
+	connectLocalPeers(ctx, t, peers[0], peers[1])
 	for _, p := range peers {
 		if err := p.close(); err != nil {
 			t.Fatal(err)
@@ -524,39 +593,43 @@ func TestIntentionalPeerShutdownIsQuiet(t *testing.T) {
 func TestChannelErrorRemainsVisibleAfterClose(t *testing.T) {
 	for _, callbackErr := range []error{errors.New("private transport details"), fmt.Errorf("%w: private transport details", context.DeadlineExceeded)} {
 		for _, order := range []string{"error first", "close first", "after cleanup"} {
-			t.Run(fmt.Sprintf("%s/deadline=%t", order, errors.Is(callbackErr, context.DeadlineExceeded)), func(t *testing.T) {
-				var output bytes.Buffer
-				p, err := newPeer(t.Context(), webrtc.SettingEngine{}, nil, log.New(&output, "", 0), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer p.close()
-				if order != "error first" {
-					p.cancel(errRemoteClosed)
-				}
-				if order == "after cleanup" {
-					if err := p.close(); err != nil {
+			t.Run(
+				fmt.Sprintf("%s/deadline=%t", order, errors.Is(callbackErr, context.DeadlineExceeded)),
+				func(t *testing.T) {
+					var output bytes.Buffer
+					p, err := newPeer(t.Context(), webrtc.SettingEngine{}, nil, log.New(&output, "", 0), nil)
+					if err != nil {
 						t.Fatal(err)
 					}
-				}
-				p.channelError(callbackErr)
-				p.cancel(errRemoteClosed)
-				expectedDeadline := order == "after cleanup" && errors.Is(callbackErr, context.DeadlineExceeded)
-				wantReports := 1
-				if expectedDeadline {
-					wantReports = 0
-				}
-				if strings.Count(output.String(), "Voice control channel failed.") != wantReports || strings.Contains(output.String(), "private") {
-					t.Fatal("missing or unsafe callback diagnostic", output.String())
-				}
-				got := p.outcome(context.Cause(p.ctx))
-				if got == nil || strings.Contains(got.Error(), "voice control channel failed") == expectedDeadline {
-					t.Fatal("unexpected channel failure lost or forced local deadline became fatal", got)
-				}
-			})
+					defer p.close()
+					if order != "error first" {
+						p.cancel(errRemoteClosed)
+					}
+					if order == "after cleanup" {
+						if closeErr := p.close(); closeErr != nil {
+							t.Fatal(closeErr)
+						}
+					}
+					p.channelError(callbackErr)
+					p.cancel(errRemoteClosed)
+					expectedDeadline := order == "after cleanup" && errors.Is(callbackErr, context.DeadlineExceeded)
+					wantReports := 1
+					if expectedDeadline {
+						wantReports = 0
+					}
+					if strings.Count(output.String(), "Voice control channel failed.") != wantReports ||
+						strings.Contains(output.String(), "private") {
+						t.Fatal("missing or unsafe callback diagnostic", output.String())
+					}
+					got := p.outcome(context.Cause(p.ctx))
+					if got == nil || strings.Contains(got.Error(), "voice control channel failed") == expectedDeadline {
+						t.Fatal("unexpected channel failure lost or forced local deadline became fatal", got)
+					}
+				},
+			)
 		}
 	}
-	p := localPeer(t, t.Context())
+	p := localPeer(t.Context(), t)
 	p.cancel(errRemoteClosed)
 	p.channelError(io.EOF)
 	if got := p.outcome(context.Cause(p.ctx)); !errors.Is(got, errRemoteClosed) {
@@ -571,8 +644,8 @@ func TestChannelErrorRemainsVisibleAfterClose(t *testing.T) {
 func TestMalformedRTCPStopsDrainWithSafeError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	a, b := localPeer(t, ctx), localPeer(t, ctx)
-	connectLocalPeers(t, ctx, a, b)
+	a, b := localPeer(ctx, t), localPeer(ctx, t)
+	connectLocalPeers(ctx, t, a, b)
 	ssrc := a.pc.GetSenders()[0].GetParameters().Encodings[0].SSRC
 	packet := rtcp.RawPacket{0x8f, 205, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0}
 	binary.BigEndian.PutUint32(packet[8:], uint32(ssrc))
@@ -592,8 +665,8 @@ func TestMalformedRTCPStopsDrainWithSafeError(t *testing.T) {
 func TestDataChannelReceiveBoundAndCleanShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	a, b := localPeer(t, ctx), localPeer(t, ctx)
-	connectLocalPeers(t, ctx, a, b)
+	a, b := localPeer(ctx, t), localPeer(ctx, t)
+	connectLocalPeers(ctx, t, a, b)
 	data := `{"type":"future_event"}`
 	data += strings.Repeat(" ", 256*1024-len(data))
 	if err := b.dc.SendText(data); err != nil {
@@ -626,34 +699,38 @@ func TestOversizedDataChannelReceive(t *testing.T) {
 		size int
 		want string
 	}{{256*1024 + 1, "voice event exceeds 256 KiB"}, {512 * 1024, "voice event exceeds 256 KiB"}} {
-		t.Run(fmt.Sprint(tc.size), func(t *testing.T) {
+		t.Run(strconv.Itoa(tc.size), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			a, b := localPeer(t, ctx), localPeer(t, ctx)
+			a, b := localPeer(ctx, t), localPeer(ctx, t)
 			offer, err := a.offer(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			// Let the sender exceed the receiver's actual limit without its own admission check.
 			advertised := strings.Replace(offer, "a=max-message-size:262144", "a=max-message-size:1048576", 1)
-			answerLocalOffer(t, ctx, a, b, advertised)
+			answerLocalOffer(ctx, t, a, b, advertised)
 			data := `{"type":"future_event","message":"private-marker"}`
 			data += strings.Repeat(" ", tc.size-len(data))
-			if err := b.dc.SendText(data); err != nil {
-				t.Fatal("fixture did not send the oversized message", err)
+			if sendTextErr := b.dc.SendText(data); sendTextErr != nil {
+				t.Fatal("fixture did not send the oversized message", sendTextErr)
 			}
 			select {
 			case <-a.ctx.Done():
 			case <-ctx.Done():
 				t.Fatal("oversized receive did not terminate the peer")
 			}
-			if got := a.outcome(context.Cause(a.ctx)); got == nil || !strings.Contains(got.Error(), tc.want) || strings.Contains(got.Error(), "private-marker") {
+			if got := a.outcome(
+				context.Cause(a.ctx),
+			); got == nil || !strings.Contains(got.Error(), tc.want) ||
+				strings.Contains(got.Error(), "private-marker") {
 				t.Fatal("oversized receive lost its safe failure", got)
 			}
 		})
 	}
 }
 
+//nolint:errorlint // Exact sentinel identity distinguishes benign cancellation from wrapped or joined failures.
 func TestRunCallMarksGenuineFailuresThroughCancellation(t *testing.T) {
 	failure := errors.New("received voice session rejection")
 	for _, cause := range []error{

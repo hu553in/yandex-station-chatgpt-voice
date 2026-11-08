@@ -11,6 +11,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// NotifyContext preserves the signal cause; forward plain cancellation for a quiet stop.
@@ -21,6 +25,7 @@ func main() {
 	err := voice.Run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 	if code := voice.ExitCode(err); code != 0 {
 		log.New(os.Stderr, "", log.LstdFlags|log.LUTC).Print("Error: ", err)
-		os.Exit(code)
+		return code
 	}
+	return 0
 }

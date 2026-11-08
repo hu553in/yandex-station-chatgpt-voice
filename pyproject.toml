@@ -1,0 +1,80 @@
+[project]
+name = "yandex-station-chatgpt-voice-tools"
+version = "0.1.0"
+description = "Host tools for building and managing the native Station Voice client."
+authors = [{ name = "Ruslan Khasanshin" }]
+readme = "README.md"
+requires-python = ">=3.10.0"
+dependencies = ["playwright==1.64.1"]
+
+[project.urls]
+Repository = "https://github.com/hu553in/yandex-station-chatgpt-voice"
+
+[dependency-groups]
+dev = [
+  "bandit>=1.9.4",
+  "clang-format==23.1.5",
+  "clang-tidy==23.1.4",
+  "deptry>=0.25.1",
+  "prek>=0.5.10",
+  "pysentry-rs>=0.5.0",
+  "ruff>=0.17.3",
+  "ty>=0.0.98",
+  "vulture>=2.16",
+]
+
+[tool.uv]
+package = false
+link-mode = "copy"
+# Matches the Renovate minimumReleaseAge, so lockfile maintenance waits too.
+exclude-newer = "3 days"
+
+[tool.ruff]
+line-length = 100
+# Generated native build sources are outside the application Python tree.
+extend-exclude = [".cache"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "UP",
+  "B",
+  "SIM",
+  "ARG",
+  "PL",
+  "RUF",
+  "C4",
+  "FA",
+  "N",
+  "PERF",
+  "W",
+  "PGH004",
+  "T10",
+]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+# These comparisons express cookie ASCII, ELF ABI and Unix exit-status constants.
+"tools/browser_login.py" = ["PLR2004"]
+"tools/station.py" = ["PLR2004"]
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.pysentry.defaults]
+fail_on = "low"
+
+[tool.pysentry.sources]
+enabled = ["pypa", "pypi", "osv"]
+
+[tool.deptry]
+known_first_party = ["browser_login", "station"]
+
+[tool.vulture]
+paths = ["tools"]
+min_confidence = 100
+sort_by_size = true

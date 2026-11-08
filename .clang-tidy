@@ -1,0 +1,10 @@
+# Check the real C wrapper and its vendor-ABI fixture using host POSIX headers.
+# Vendor and CGo entry-point signatures have a fixed positional ABI.
+Checks: >-
+  -*, clang-analyzer-*, bugprone-*, performance-*, portability-*,
+  -bugprone-easily-swappable-parameters
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(^|/)internal/voice/'
+CheckOptions:
+  # glibc has no Annex K functions; report only replacements available in the target libc.
+  'clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling:ReportMode': actionable

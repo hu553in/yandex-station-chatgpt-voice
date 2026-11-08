@@ -69,11 +69,11 @@ func TestCappedLogRetainsOnlyTwoBoundedSegments(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte(strings.Repeat("0123456789", 21))
-	if n, err := output.Write(payload); err != nil || n != len(payload) {
-		t.Fatal(n, err)
+	if n, writeErr := output.Write(payload); writeErr != nil || n != len(payload) {
+		t.Fatal(n, writeErr)
 	}
-	if err := output.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := output.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	previous, err := os.ReadFile(path + ".1")
 	if err != nil {
@@ -83,17 +83,18 @@ func TestCappedLogRetainsOnlyTwoBoundedSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(previous) != 64 || len(current) != 18 || !bytes.Equal(append(previous, current...), payload[len(payload)-82:]) {
+	if len(previous) != 64 || len(current) != 18 ||
+		!bytes.Equal(append(previous, current...), payload[len(payload)-82:]) {
 		t.Fatal("rotation lost ordering or exceeded the bound")
 	}
-	if err := os.WriteFile(path, payload, 0600); err != nil {
-		t.Fatal(err)
+	if writeFileErr := os.WriteFile(path, payload, 0600); writeFileErr != nil {
+		t.Fatal(writeFileErr)
 	}
 	output, err = openCappedLog(path, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	output.Close()
+	_ = output.Close()
 	current, _ = os.ReadFile(path)
 	if !bytes.Equal(current, payload[len(payload)-64:]) {
 		t.Fatal("pre-existing oversized log did not retain its recent tail")
@@ -111,7 +112,7 @@ func TestCappedLogRefusesSymlinks(t *testing.T) {
 			t.Fatal(err)
 		}
 		if output, err := openCappedLog(path, 64); err == nil {
-			output.Close()
+			_ = output.Close()
 			t.Fatal("symlink accepted")
 		}
 		if got, _ := os.ReadFile(target); string(got) != "untouched" {
@@ -132,7 +133,7 @@ func (w *childOutput) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestSupervisorChildFixture(t *testing.T) {
+func TestSupervisorChildFixture(_ *testing.T) {
 	if os.Getenv("STATION_SUPERVISOR_FIXTURE") == "panic" {
 		panic("synthetic worker panic")
 	}
@@ -141,7 +142,7 @@ func TestSupervisorChildFixture(t *testing.T) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
-	fmt.Println("test-ready")
+	_, _ = fmt.Fprintln(os.Stdout, "test-ready")
 	<-ctx.Done()
 }
 
@@ -159,13 +160,21 @@ func TestSupervisorRecoversActualGoPanics(t *testing.T) {
 		pause:  func(context.Context) error { return nil },
 		child: func(ctx context.Context) (int, error) {
 			calls++
-			return runChild(ctx, os.Args[0], []string{"-test.run=^TestSupervisorChildFixture$"}, lock, io.Discard, log.New(io.Discard, "", 0))
+			return runChild(
+				ctx,
+				os.Args[0],
+				[]string{"-test.run=^TestSupervisorChildFixture$"},
+				lock,
+				io.Discard,
+				log.New(io.Discard, "", 0),
+			)
 		},
 	}
-	if err := s.run(t.Context()); err == nil || calls != 3 || ExitCode(err) != 1 {
-		t.Fatalf("panic was treated as clean exit or invalid credentials: calls=%d err=%v", calls, err)
+	if runErr := s.run(t.Context()); runErr == nil || calls != 3 || ExitCode(runErr) != 1 {
+		t.Fatalf("panic was treated as clean exit or invalid credentials: calls=%d err=%v", calls, runErr)
 	}
-	if ExitCode(configError{errors.New("bad saved session")}) != 78 || ExitCode(errors.Join(errStationAudio, context.Canceled)) != 1 {
+	if ExitCode(configError{errors.New("bad saved session")}) != 78 ||
+		ExitCode(errors.Join(errStationAudio, context.Canceled)) != 1 {
 		t.Fatal("configuration and canceled audio faults have ambiguous exit codes")
 	}
 }
@@ -177,28 +186,28 @@ func TestLogFailureDropsOutputAndRecoversRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer output.Close()
-	output.Write(bytes.Repeat([]byte("a"), 64))
-	if err := os.Mkdir(path+".1", 0700); err != nil {
-		t.Fatal(err)
+	_, _ = output.Write(bytes.Repeat([]byte("a"), 64))
+	if mkdirErr := os.Mkdir(path+".1", 0700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if n, err := output.Write([]byte("dropped")); n != 7 || err != nil {
-		t.Fatal("log failure escaped to worker pipe", n, err)
+	if n, writeErr := output.Write([]byte("dropped")); n != 7 || writeErr != nil {
+		t.Fatal("log failure escaped to worker pipe", n, writeErr)
 	}
-	if _, err := output.f.Stat(); err != nil {
-		t.Fatal("failed rotation closed the active descriptor", err)
+	if _, statErr := output.f.Stat(); statErr != nil {
+		t.Fatal("failed rotation closed the active descriptor", statErr)
 	}
-	if err := os.Remove(path + ".1"); err != nil {
-		t.Fatal(err)
+	if removeErr := os.Remove(path + ".1"); removeErr != nil {
+		t.Fatal(removeErr)
 	}
-	output.Write([]byte("recovered"))
+	_, _ = output.Write([]byte("recovered"))
 	previous, _ := os.ReadFile(path + ".1")
 	current, _ := os.ReadFile(path)
 	if len(previous) > 64 || len(current) > 64 || !bytes.Contains(append(previous, current...), []byte("recovered")) {
 		t.Fatal("log did not recover with bounded segments")
 	}
-	output.f.Close()
-	if n, err := output.Write([]byte("unwritable")); n != 10 || err != nil {
-		t.Fatal("write fault escaped to worker pipe", n, err)
+	_ = output.f.Close()
+	if n, closedWriteErr := output.Write([]byte("unwritable")); n != 10 || closedWriteErr != nil {
+		t.Fatal("write fault escaped to worker pipe", n, closedWriteErr)
 	}
 }
 
@@ -210,8 +219,8 @@ func TestSupervisorOwnsChildAndInheritedLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	if other, err := supervisorLock(dir); err == nil {
-		other.Close()
+	if other, supervisorLockErr := supervisorLock(dir); supervisorLockErr == nil {
+		_ = other.Close()
 		t.Fatal("a second supervisor acquired the live lock")
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -220,19 +229,26 @@ func TestSupervisorOwnsChildAndInheritedLock(t *testing.T) {
 	output := &childOutput{ready: ready, signal: sync.OnceFunc(func() { close(ready) })}
 	done := make(chan error, 1)
 	go func() {
-		_, err := runChild(ctx, os.Args[0], []string{"-test.run=^TestSupervisorChildFixture$"}, lock, output, log.New(io.Discard, "", 0))
-		done <- err
+		_, runChildErr := runChild(
+			ctx,
+			os.Args[0],
+			[]string{"-test.run=^TestSupervisorChildFixture$"},
+			lock,
+			output,
+			log.New(io.Discard, "", 0),
+		)
+		done <- runChildErr
 	}()
 	select {
 	case <-output.ready:
-	case err := <-done:
-		t.Fatal("worker exited before readiness", err)
+	case operationErr := <-done:
+		t.Fatal("worker exited before readiness", operationErr)
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker did not start")
 	}
-	lock.Close()
-	if other, err := supervisorLock(dir); err == nil {
-		other.Close()
+	_ = lock.Close()
+	if other, inheritedLockErr := supervisorLock(dir); inheritedLockErr == nil {
+		_ = other.Close()
 		t.Fatal("worker did not retain its supervisor lock")
 	}
 	cancel()
@@ -245,5 +261,5 @@ func TestSupervisorOwnsChildAndInheritedLock(t *testing.T) {
 	if err != nil {
 		t.Fatal("reaped worker retained its lock", err)
 	}
-	other.Close()
+	_ = other.Close()
 }

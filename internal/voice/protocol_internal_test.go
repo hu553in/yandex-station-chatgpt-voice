@@ -21,7 +21,10 @@ func testEnvelope(t *testing.T, inner string) []byte {
 }
 
 func TestWebsiteProtocol(t *testing.T) {
-	session, err := encodeSession(time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("Asia/Kolkata", 19800)), sessionSettings{})
+	session, err := encodeSession(
+		time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("Asia/Kolkata", 19800)),
+		sessionSettings{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +160,8 @@ func TestGoodbyeEvents(t *testing.T) {
 				if err != nil || ev.ended != tc.normal || (ev.err == nil) != tc.normal {
 					t.Fatalf("terminal classification: %+v, %v", ev, err)
 				}
-				if ev.err != nil && (!strings.Contains(ev.err.Error(), tc.diagnostic) || strings.Contains(ev.err.Error(), "private-marker")) {
+				if ev.err != nil &&
+					(!strings.Contains(ev.err.Error(), tc.diagnostic) || strings.Contains(ev.err.Error(), "private-marker")) {
 					t.Fatalf("unsafe or missing terminal diagnostic: %v", ev.err)
 				}
 			}
@@ -199,7 +203,10 @@ func TestRunSettingsPayload(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := settings
-			data, err := encodeSession(time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("Asia/Kolkata", 19800)), settings)
+			data, err := encodeSession(
+				time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("Asia/Kolkata", 19800)),
+				settings,
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,8 +214,8 @@ func TestRunSettingsPayload(t *testing.T) {
 				t.Fatal("encoding changed the startup snapshot")
 			}
 			var got map[string]any
-			if err := json.Unmarshal(data, &got); err != nil {
-				t.Fatal(err)
+			if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
+				t.Fatal(unmarshalErr)
 			}
 			id, ok := got["voice_session_id"].(string)
 			if !ok || len(id) != 36 || strings.ToUpper(id) != id {

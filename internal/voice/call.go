@@ -21,6 +21,10 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+const signalingTimeout = 30 * time.Second
+
+const maxRTCPPacketBytes = 1500
+
 const signalingURL = "https://chatgpt.com/realtime/wm?dcid=0"
 const maxAnswerBytes = 1 << 20
 const maxSCTPReceiveBufferBytes = 1 << 20
@@ -46,15 +50,34 @@ type peer struct {
 	abort     context.CancelCauseFunc
 }
 
-func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrtc.ICEServer, report *log.Logger, abort context.CancelCauseFunc) (*peer, error) {
+//nolint:funlen,gocognit // Callback closures share peer teardown and cancellation state; keep their registration together.
+func newPeer(
+	ctx context.Context,
+	settings webrtc.SettingEngine,
+	servers []webrtc.ICEServer,
+	report *log.Logger,
+	abort context.CancelCauseFunc,
+) (*peer, error) {
 	settings.SetSCTPMaxMessageSize(maxMessageBytes)
 	settings.SetSCTPMaxReceiveBufferSize(maxSCTPReceiveBufferBytes)
-	settings.LoggerFactory = &logging.DefaultLoggerFactory{Writer: io.Discard, DefaultLogLevel: logging.LogLevelDisabled}
+	settings.LoggerFactory = &logging.DefaultLoggerFactory{
+		Writer:          io.Discard,
+		DefaultLogLevel: logging.LogLevelDisabled,
+	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settings))
 	ctx, cancel := context.WithCancelCause(ctx)
-	p := &peer{report: report, ctx: ctx, cancel: cancel, ready: make(chan struct{}), tracks: make(chan *webrtc.TrackRemote, 1), abort: abort}
+	p := &peer{
+		report: report,
+		ctx:    ctx,
+		cancel: cancel,
+		ready:  make(chan struct{}),
+		tracks: make(chan *webrtc.TrackRemote, 1),
+		abort:  abort,
+	}
 	var err error
-	p.pc, err = api.NewPeerConnection(webrtc.Configuration{ICEServers: servers, BundlePolicy: webrtc.BundlePolicyMaxBundle})
+	p.pc, err = api.NewPeerConnection(
+		webrtc.Configuration{ICEServers: servers, BundlePolicy: webrtc.BundlePolicyMaxBundle},
+	)
 	if err != nil {
 		cancel(err)
 		return nil, errors.New("cannot create WebRTC peer")
@@ -71,11 +94,23 @@ func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrt
 		return nil
 	})
 	fail := func(message string) (*peer, error) { return nil, errors.Join(errors.New(message), p.close()) }
-	p.mic, err = webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1"}, "microphone", "voice")
+	p.mic, err = webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   playbackSampleRate,
+			Channels:    stereoChannels,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		"microphone",
+		"voice",
+	)
 	if err != nil {
 		return fail("cannot create Opus track")
 	}
-	tx, err := p.pc.AddTransceiverFromTrack(p.mic, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendrecv})
+	tx, err := p.pc.AddTransceiverFromTrack(
+		p.mic,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendrecv},
+	)
 	if err != nil {
 		return fail("cannot attach Opus track")
 	}
@@ -89,7 +124,10 @@ func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrt
 	if len(opusCodecs) == 0 || tx.SetCodecPreferences(opusCodecs) != nil {
 		return fail("cannot select Opus codec")
 	}
-	p.dc, err = p.pc.CreateDataChannel("", &webrtc.DataChannelInit{Negotiated: new(true), Ordered: new(true), ID: new(uint16(0))})
+	p.dc, err = p.pc.CreateDataChannel(
+		"",
+		&webrtc.DataChannelInit{Negotiated: new(true), Ordered: new(true), ID: new(uint16(0))},
+	)
 	if err != nil {
 		return fail("cannot create voice control channel")
 	}
@@ -117,6 +155,7 @@ func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrt
 			p.fail(errors.New("WebRTC connection lost"))
 		case webrtc.PeerConnectionStateClosed:
 			p.cancel(errRemoteClosed)
+		case webrtc.PeerConnectionStateUnknown, webrtc.PeerConnectionStateNew, webrtc.PeerConnectionStateConnecting:
 		}
 	})
 	p.pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
@@ -135,10 +174,10 @@ func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrt
 		}
 	})
 	p.wg.Go(func() {
-		buffer := make([]byte, 1500)
+		buffer := make([]byte, maxRTCPPacketBytes)
 		for {
-			if _, _, err := tx.Sender().Read(buffer); err != nil {
-				if p.ctx.Err() == nil && !closedTransport(err) {
+			if _, _, readErr := tx.Sender().Read(buffer); readErr != nil {
+				if p.ctx.Err() == nil && !closedTransport(readErr) {
 					p.fail(errors.New("microphone RTCP transport failed"))
 				}
 				return
@@ -149,7 +188,8 @@ func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrt
 }
 
 func closedTransport(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, context.Canceled)
 }
 
 func (p *peer) fail(err error) {
@@ -166,7 +206,8 @@ func (p *peer) fail(err error) {
 
 func (p *peer) channelError(err error) {
 	// Pion's Stop aborts SCTP; its final stream reset can race association closure.
-	if closedTransport(err) || errors.Is(err, sctp.ErrUserInitiatedAbort) || errors.Is(err, sctp.ErrResetPacketInStateNotExist) {
+	if closedTransport(err) || errors.Is(err, sctp.ErrUserInitiatedAbort) ||
+		errors.Is(err, sctp.ErrResetPacketInStateNotExist) {
 		return
 	}
 	// SCTP Stop forces a DTLS read deadline to unblock local teardown.
@@ -181,6 +222,7 @@ func (p *peer) channelError(err error) {
 func (p *peer) outcome(result error) error {
 	p.failureMu.Lock()
 	defer p.failureMu.Unlock()
+	//nolint:errorlint // Only the exact sentinel is benign; wrapped or joined failures must remain failures.
 	if result == errProtocolHangup {
 		result = nil
 	}
@@ -191,15 +233,17 @@ func (p *peer) outcome(result error) error {
 }
 
 func (p *peer) handleMessage(data []byte) {
+	//nolint:errorlint // Only the exact sentinel is benign; wrapped or joined failures must remain failures.
 	if p.ctx.Err() != nil && context.Cause(p.ctx) != errProtocolHangup {
 		return
 	}
 	ev, err := decodeEvent(data)
-	if err != nil {
+	switch {
+	case err != nil:
 		p.fail(err)
-	} else if ev.err != nil {
+	case ev.err != nil:
 		p.fail(ev.err)
-	} else if ev.ended {
+	case ev.ended:
 		p.cancel(errProtocolHangup)
 	}
 }
@@ -216,7 +260,7 @@ func (p *peer) offer(ctx context.Context) (string, error) {
 	if p.pc.SetLocalDescription(offer) != nil {
 		return "", errors.New("cannot set voice offer")
 	}
-	gatherCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	gatherCtx, cancel := context.WithTimeout(ctx, setupTimeout)
 	defer cancel()
 	select {
 	case <-gatherCtx.Done():
@@ -245,16 +289,32 @@ func (p *peer) accept(answer string) error {
 	return nil
 }
 
+//nolint:gochecknoglobals // Offline session tests replace this HTTP-client boundary while exercising fixed-origin requests.
 var callClient = signalingClient
 
 func signalingClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		panic("default HTTP transport must be *http.Transport")
+	}
+	transport := defaultTransport.Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	transport.MaxResponseHeaderBytes = maxSessionResponseBytes
-	return &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return &http.Client{
+		Transport:     transport,
+		Timeout:       signalingTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
-func exchangeOffer(ctx context.Context, client *http.Client, auth credential, offer string, session []byte) (string, error) {
+//nolint:funlen // Keep request validation, response bounds, and sanitized failures together.
+func exchangeOffer(
+	ctx context.Context,
+	client *http.Client,
+	auth credential,
+	offer string,
+	session []byte,
+) (string, error) {
 	if !validCredential(auth) {
 		return "", errors.New("invalid web credential")
 	}
@@ -300,7 +360,9 @@ func exchangeOffer(ctx context.Context, client *http.Client, auth credential, of
 	case http.StatusUnauthorized:
 		return "", errors.New("ChatGPT rejected the web session (401); run make login on the computer")
 	case http.StatusForbidden:
-		return "", errors.New("ChatGPT rejected voice access (403); account entitlement or edge restrictions may prevent this native client")
+		return "", errors.New(
+			"ChatGPT rejected voice access (403); account entitlement or edge restrictions may prevent this native client",
+		)
 	case http.StatusOK, http.StatusCreated:
 	default:
 		return "", fmt.Errorf("ChatGPT voice signaling returned HTTP %d", response.StatusCode)
@@ -322,6 +384,7 @@ func exchangeOffer(ctx context.Context, client *http.Client, auth credential, of
 	return sdp + "\r\n", nil
 }
 
+//nolint:cyclop,errorlint,funlen,gocognit,gocyclo // Keep ordered media teardown and exact sentinel identity; aggregates remain failures.
 func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, settings sessionSettings) (result error) {
 	defer func() {
 		switch result {
@@ -349,7 +412,13 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 	}
 	ctx := e.ctx
 	var workers sync.WaitGroup
-	p, err := newPeer(ctx, webrtc.SettingEngine{}, []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302", "stun:stun4.l.google.com:19302"}}}, e.report, e.revoke)
+	p, err := newPeer(
+		ctx,
+		webrtc.SettingEngine{},
+		[]webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302", "stun:stun4.l.google.com:19302"}}},
+		e.report,
+		e.revoke,
+	)
 	if err != nil {
 		return err
 	}
@@ -370,8 +439,8 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 		}
 		if playbackOpened {
 			e.report.Print("Voice call ended by ChatGPT; finishing received audio.")
-			if err := e.output.finish(e.ctx); err != nil {
-				return err
+			if finishErr := e.output.finish(e.ctx); finishErr != nil {
+				return finishErr
 			}
 		}
 		return errProtocolHangup
@@ -451,7 +520,7 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 	if setupCtx.Err() != nil {
 		return errors.New("voice setup ended while opening playback")
 	}
-	if err = playCue(setupCtx, 880); err != nil {
+	if err = playCue(setupCtx, readyCueFrequency); err != nil {
 		return complete(err)
 	}
 	if err = capture.beginStreaming(setupCtx); err != nil {
@@ -460,8 +529,8 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 	finishSetup()
 	e.report.Print("Voice media ready.")
 	workers.Go(func() {
-		if err := e.output.send(ctx, p.mic, capture.input); err != nil {
-			e.revoke(err)
+		if sendErr := e.output.send(ctx, p.mic, capture.input); sendErr != nil {
+			e.revoke(sendErr)
 		}
 	})
 	for {
@@ -470,8 +539,8 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 			return complete(context.Cause(ctx))
 		case track := <-p.tracks:
 			workers.Go(func() {
-				if err := e.output.receive(ctx, track); err != nil {
-					e.revoke(err)
+				if receiveErr := e.output.receive(ctx, track); receiveErr != nil {
+					e.revoke(receiveErr)
 				}
 			})
 		}

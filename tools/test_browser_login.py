@@ -1,16 +1,15 @@
 import json
 import os
-from pathlib import Path
 import stat
-import subprocess
+import subprocess  # nosec B404 # explicit local argv, no host shell
 import sys
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import browser_login
-
 
 TOOLS = Path(__file__).resolve().parent
 GOLDEN = TOOLS.parent / "internal/voice/testdata/browser-sign-in.json"
@@ -86,9 +85,7 @@ class BrowserProgramTest(unittest.TestCase):
             program = Path(directory) / "Google Chrome; $(touch MARKER) `x`"
             program.write_text("#!/bin/sh\n")
             program.chmod(0o700)
-            self.assertEqual(
-                browser_login.browser_program(str(program)), str(program)
-            )
+            self.assertEqual(browser_login.browser_program(str(program)), str(program))
             program.chmod(0o600)
             for value in (str(program), "chrome", str(Path(directory) / "missing"), directory):
                 with self.subTest(value=value), self.assertRaises(browser_login.UserError):
@@ -116,7 +113,7 @@ class BrowserProgramTest(unittest.TestCase):
     def test_debugging_environment_is_removed(self):
         environ = {
             "DEBUG": "pw:protocol",
-            "DEBUG_FILE": "/tmp/protocol.log",
+            "DEBUG_FILE": "synthetic-protocol.log",
             "PWDEBUG": "1",
             "PW_TEST_SOURCE_TRANSFORM": "x",
             "PLAYWRIGHT_DRIVER_PATH": "x",
@@ -161,15 +158,17 @@ class FakeBrowser:
         self.environment = None
         self.terminated = False
 
-    def launch(self, command, **options):
+    def launch(self, command, **_options):
         self.environment = dict(os.environ)
-        profile = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--user-data-dir="))
+        profile = next(
+            arg.split("=", 1)[1] for arg in command if arg.startswith("--user-data-dir=")
+        )
         info = os.stat(profile)
         self.launches.append((profile, stat.S_IMODE(info.st_mode), command))
         self.process = types.SimpleNamespace(
             poll=lambda: 1 if self.fail == "launch" or self.terminated else None,
             terminate=self.terminate,
-            wait=lambda **kwargs: 0,
+            wait=lambda **_kwargs: 0,
         )
         return self.process
 
@@ -177,6 +176,7 @@ class FakeBrowser:
         self.terminated = True
 
     def connect_over_cdp(self, address, timeout, no_defaults):
+        del timeout
         if not no_defaults:
             raise RuntimeError("default browser options must not be overwritten")
         if self.fail == "connect interrupt":
@@ -190,7 +190,8 @@ class FakeBrowser:
         return self
 
     def close(self):
-        self.context.close()
+        if self.context is not None:
+            self.context.close()
 
     def module(self):
         browser = self
@@ -206,7 +207,7 @@ class FakeBrowser:
                 return Playwright()
 
         sync_api = types.ModuleType("playwright.sync_api")
-        sync_api.sync_playwright = Manager
+        vars(sync_api)["sync_playwright"] = Manager
         return {"playwright": types.ModuleType("playwright"), "playwright.sync_api": sync_api}
 
 
@@ -229,7 +230,9 @@ class CaptureLifecycleTest(unittest.TestCase):
         profile, mode, command = browser.launches[0]
         self.assertEqual(mode, 0o700)
         self.assertIn("--remote-debugging-address=127.0.0.1", command)
-        port = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--remote-debugging-port="))
+        port = next(
+            arg.split("=", 1)[1] for arg in command if arg.startswith("--remote-debugging-port=")
+        )
         self.assertGreater(int(port), 0)
         self.assertNotIn("--enable-automation", command)
         self.assertNotIn("--no-sandbox", command)
@@ -257,7 +260,7 @@ class CaptureLifecycleTest(unittest.TestCase):
 
     def test_cancel_and_interrupt_clean_up(self):
         for name, confirm, expected in (
-            ("EOF", lambda: False, browser_login.Canceled),
+            ("EOF", lambda: False, browser_login.CanceledError),
             ("Ctrl-C", mock.Mock(side_effect=KeyboardInterrupt), KeyboardInterrupt),
         ):
             with self.subTest(name=name):
@@ -269,10 +272,14 @@ class CaptureLifecycleTest(unittest.TestCase):
 
     def test_closed_sign_in_window_saves_nothing(self):
         browser = FakeBrowser()
+
         def confirm():
-            browser.context.close()
+            self.assertIsNotNone(browser.context)
+            if browser.context is not None:
+                browser.context.close()
             return True
-        with self.assertRaises(browser_login.Canceled):
+
+        with self.assertRaises(browser_login.CanceledError):
             self.run_capture(browser, confirm)
         self.assertEqual(browser.cookie_urls, [])
         self.assert_cleaned(browser)
@@ -313,9 +320,9 @@ class CaptureLifecycleTest(unittest.TestCase):
             mock.patch.object(browser_login, "browser_program", return_value="/synthetic/chrome"),
             mock.patch.dict(os.environ),
             mock.patch.object(browser_login.tempfile, "mkdtemp") as profile,
+            self.assertRaises(browser_login.UserError) as rejected,
         ):
-            with self.assertRaises(browser_login.UserError) as rejected:
-                browser_login.capture("", lambda: True, print)
+            browser_login.capture("", lambda: True, print)
         self.assertIn("Playwright is not available", str(rejected.exception))
         profile.assert_not_called()
 
@@ -328,8 +335,12 @@ class MainTest(unittest.TestCase):
                 os.dup2(diagnostics.fileno(), 2)
                 with (
                     mock.patch.dict(sys.modules, browser.module()),
-                    mock.patch.object(browser_login, "browser_program", return_value="/synthetic/chrome"),
-                    mock.patch.object(browser_login.subprocess, "Popen", side_effect=browser.launch),
+                    mock.patch.object(
+                        browser_login, "browser_program", return_value="/synthetic/chrome"
+                    ),
+                    mock.patch.object(
+                        browser_login.subprocess, "Popen", side_effect=browser.launch
+                    ),
                     mock.patch.object(sys, "stdin", stdin),
                 ):
                     code = browser_login.main(["--chrome=", str(output)])
@@ -342,14 +353,20 @@ class MainTest(unittest.TestCase):
     def test_writes_private_transfer_file(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "sign-in.json"
-            code, diagnostics = self.run_main(FakeBrowser(), mock.Mock(readline=lambda: "\n"), output)
+            code, diagnostics = self.run_main(
+                FakeBrowser(), mock.Mock(readline=lambda: "\n"), output
+            )
             self.assertEqual(code, 0, diagnostics)
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
             self.assertEqual(json.loads(output.read_text()), json.loads(GOLDEN.read_text()))
             self.assertEqual(diagnostics, browser_login.PROMPT + "\n")
-            code, diagnostics = self.run_main(FakeBrowser(), mock.Mock(readline=lambda: "\n"), output)
+            code, diagnostics = self.run_main(
+                FakeBrowser(), mock.Mock(readline=lambda: "\n"), output
+            )
             self.assertEqual(code, 1)
-            self.assertEqual(diagnostics.splitlines()[-1], "Error: Cannot create the private sign-in file.")
+            self.assertEqual(
+                diagnostics.splitlines()[-1], "Error: Cannot create the private sign-in file."
+            )
 
     def test_failure_and_cancel_save_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -428,7 +445,7 @@ print(json.dumps({
     "user_prompted_once": notes == [browser_login.PROMPT],
     "no_requests_left_chatgpt_fixture": not external,
 }))
-"""
+"""  # noqa: E501
 
 
 @unittest.skipUnless(
@@ -439,21 +456,44 @@ class RealChromeFixtureTest(unittest.TestCase):
     def test_capture_through_installed_chrome(self):
         uv = os.environ.get("UV") or "uv"
         headed = os.environ.get("STATION_BROWSER_HEADED", "")
-        result = subprocess.run(
-            [uv, "run", "--script", str(TOOLS / "browser_login.py"), "--help"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 # local test fixture or fixed tool argv
             [
-                uv, "run", "--no-project", "--with", "playwright==1.64.1", "python", "-I", "-B", "-c",
-                FIXTURE, str(TOOLS), os.environ.get("CHROME", ""), headed, str(GOLDEN),
+                uv,
+                "run",
+                "--locked",
+                "--project",
+                str(TOOLS.parent),
+                "python",
+                str(TOOLS / "browser_login.py"),
+                "--help",
             ],
             capture_output=True,
             text=True,
             timeout=300,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        result = subprocess.run(  # nosec B603 # local test fixture or fixed tool argv
+            [
+                uv,
+                "run",
+                "--locked",
+                "--project",
+                str(TOOLS.parent),
+                "python",
+                "-I",
+                "-B",
+                "-c",
+                FIXTURE,
+                str(TOOLS),
+                os.environ.get("CHROME", ""),
+                headed,
+                str(GOLDEN),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         verdict = json.loads(result.stdout.splitlines()[-1])

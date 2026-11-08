@@ -1,20 +1,16 @@
-# /// script
-# requires-python = ">=3.10"
-# dependencies = ["playwright==1.64.1"]
-# ///
 """Sign in to ChatGPT in a private Chrome window and save only its session cookies."""
 
 import argparse
 import contextlib
 import json
 import os
-from pathlib import Path
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404 # explicit local argv, no host shell
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 SESSION_COOKIE = "__Secure-next-auth.session-token"
 MAX_CHUNKS = 16
@@ -38,7 +34,7 @@ class UserError(Exception):
     pass
 
 
-class Canceled(Exception):
+class CanceledError(Exception):
     pass
 
 
@@ -95,9 +91,7 @@ def browser_program(chrome):
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
         if not explicit:
             raise UserError(CANNOT_START)
-        raise UserError(
-            "CHROME must be the full path of a Chrome or Chromium program."
-        )
+        raise UserError("CHROME must be the full path of a Chrome or Chromium program.")
     return str(path)
 
 
@@ -121,8 +115,11 @@ def running_chrome(playwright, program, profile, headless):
             if headless:
                 command.append("--headless=new")
             command.append("about:blank")
-            process = subprocess.Popen(
-                command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            process = subprocess.Popen(  # nosec B603 # validated absolute Chrome executable and literal argv
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             deadline = time.monotonic() + 15
             while process.poll() is None:
@@ -181,7 +178,8 @@ def capture(chrome, confirm, notify, *, headless=False, prepare=None):
     program = browser_program(chrome)
     scrub_environment(os.environ)
     try:
-        from playwright.sync_api import sync_playwright
+        # Load Playwright only after removing its diagnostic environment switches.
+        from playwright.sync_api import sync_playwright  # noqa: PLC0415
     except ImportError:
         raise UserError(
             "Playwright is not available. Run make login, which installs it with uv."
@@ -210,7 +208,7 @@ def capture(chrome, confirm, notify, *, headless=False, prepare=None):
             notify(PROMPT)
             while True:
                 if not confirm() or page.is_closed():
-                    raise Canceled
+                    raise CanceledError
                 try:
                     cookies = context.cookies(ORIGIN)
                 except Exception:
@@ -277,7 +275,7 @@ def main(argv=None):
         except UserError as error:
             notify(f"Error: {error}")
             return 1
-        except (Canceled, KeyboardInterrupt):
+        except (CanceledError, KeyboardInterrupt):
             return 130
         except Exception:
             notify("Error: Browser sign-in failed unexpectedly. Nothing was saved.")

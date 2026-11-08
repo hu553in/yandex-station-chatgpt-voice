@@ -23,8 +23,8 @@ func TestControlBurstsReachTerminalEvent(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/reject=%t", burst.name, reject), func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
-				a, b := localPeer(t, ctx), localPeer(t, ctx)
-				connectLocalPeers(t, ctx, a, b)
+				a, b := localPeer(ctx, t), localPeer(ctx, t)
+				connectLocalPeers(ctx, t, a, b)
 				data := `{"type":"future_event"}`
 				data += strings.Repeat(" ", burst.size-len(data))
 				for range burst.count {
@@ -57,6 +57,7 @@ func TestControlBurstsReachTerminalEvent(t *testing.T) {
 	}
 }
 
+//nolint:errorlint // Exact sentinel identity distinguishes benign cancellation from wrapped or joined failures.
 func TestFailureAfterHangupRevokesPlayback(t *testing.T) {
 	e := newStationEpoch(t.Context(), 1)
 	p, err := newPeer(e.ctx, webrtc.SettingEngine{}, nil, log.New(io.Discard, "", 0), e.revoke)
@@ -68,8 +69,8 @@ func TestFailureAfterHangupRevokesPlayback(t *testing.T) {
 	if context.Cause(p.ctx) != errProtocolHangup || !e.allowed() {
 		t.Fatal("normal hangup did not preserve permission for the accepted audio tail")
 	}
-	if _, err := p.offer(e.ctx); err != errProtocolHangup {
-		t.Fatal("terminal event allowed setup to continue", err)
+	if _, offerErr := p.offer(e.ctx); offerErr != errProtocolHangup {
+		t.Fatal("terminal event allowed setup to continue", offerErr)
 	}
 	p.handleMessage([]byte(`{"type":"session.error","message":"private-marker"}`))
 	result := p.outcome(context.Cause(p.ctx))
@@ -131,8 +132,8 @@ func TestControlRejectsMalformedAndBinaryMessages(t *testing.T) {
 		t.Run(fmt.Sprintf("binary=%t", binary), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			a, b := localPeer(t, ctx), localPeer(t, ctx)
-			connectLocalPeers(t, ctx, a, b)
+			a, b := localPeer(ctx, t), localPeer(ctx, t)
+			connectLocalPeers(ctx, t, a, b)
 			var err error
 			want := "invalid voice event JSON"
 			if binary {
@@ -161,8 +162,8 @@ func TestControlTerminationCompletionCue(t *testing.T) {
 		t.Run(fmt.Sprintf("hangup=%t", hangup), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			a, b := localPeer(t, ctx), localPeer(t, ctx)
-			connectLocalPeers(t, ctx, a, b)
+			a, b := localPeer(ctx, t), localPeer(ctx, t)
+			connectLocalPeers(ctx, t, a, b)
 			if hangup {
 				if err := b.dc.SendText(`{"type":"tool_update","update_type":"hangup"}`); err != nil {
 					t.Fatal(err)
@@ -223,7 +224,10 @@ func TestControlTerminationCompletionCue(t *testing.T) {
 			}
 			if !hangup {
 				a.channelError(errors.New("private delayed transport details"))
-				if got := a.outcome(context.Cause(a.ctx)); !errors.Is(got, errRemoteClosed) || !strings.Contains(got.Error(), "voice control channel failed") || strings.Contains(got.Error(), "private") {
+				if got := a.outcome(
+					context.Cause(a.ctx),
+				); !errors.Is(got, errRemoteClosed) || !strings.Contains(got.Error(), "voice control channel failed") ||
+					strings.Contains(got.Error(), "private") {
 					t.Fatal("delayed failure lost or leaked", got)
 				}
 			}
@@ -267,11 +271,12 @@ func TestControlFailurePublishedBeforeLog(t *testing.T) {
 	}
 }
 
+//nolint:errorlint // Exact sentinel identity distinguishes benign cancellation from wrapped or joined failures.
 func TestControlOutcomePreservesCauses(t *testing.T) {
 	failure := errors.New("earlier genuine failure")
 	for _, cause := range []error{errRemoteClosed, errAlicePriority, context.Canceled, failure} {
 		t.Run(cause.Error(), func(t *testing.T) {
-			p := localPeer(t, t.Context())
+			p := localPeer(t.Context(), t)
 			p.cancel(cause)
 			p.handleMessage([]byte(`{"type":"tool_update","update_type":"hangup"}`))
 			if got := p.outcome(context.Cause(p.ctx)); got != cause {
@@ -279,7 +284,7 @@ func TestControlOutcomePreservesCauses(t *testing.T) {
 			}
 		})
 	}
-	p := localPeer(t, t.Context())
+	p := localPeer(t.Context(), t)
 	p.handleMessage([]byte(`{"type":"tool_update","update_type":"hangup"}`))
 	if got := p.outcome(context.Cause(p.ctx)); got != nil {
 		t.Fatal("confirmed hangup was not normal", got)
@@ -291,7 +296,10 @@ func TestControlOutcomePreservesCauses(t *testing.T) {
 	}
 	p.fail(failure)
 	p.fail(errors.New("later failure"))
-	if got := p.outcome(context.Cause(p.ctx)); !errors.Is(got, failure) || strings.Contains(got.Error(), "later failure") {
+	if got := p.outcome(
+		context.Cause(p.ctx),
+	); !errors.Is(got, failure) ||
+		strings.Contains(got.Error(), "later failure") {
 		t.Fatal("hangup hid or replaced the first genuine failure", got)
 	}
 }

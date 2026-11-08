@@ -54,7 +54,7 @@ func TestWakeAdmissionPreservesFatalCaptureFailure(t *testing.T) {
 			return nil
 		})
 	}()
-	t.Cleanup(func() { cancel(); server.Close(); <-returned })
+	t.Cleanup(func() { cancel(); _ = server.Close(); <-returned })
 	if err := server.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}

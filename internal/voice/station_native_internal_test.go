@@ -13,9 +13,11 @@ func TestNativeSpotterConstructorReportsVendorFailure(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		args = append(args, "-ldl")
 	}
+	//nolint:gosec // Run the fixed host compiler with bundled fixture source and no shell.
 	if output, err := exec.CommandContext(t.Context(), "cc", args...).CombinedOutput(); err != nil {
 		t.Fatalf("cannot build native ABI fixture: %v\n%s", err, output)
 	}
+	//nolint:gosec // Execute only the current client executable or the locally compiled ABI test fixture.
 	if output, err := exec.CommandContext(t.Context(), binary).CombinedOutput(); err != nil {
 		t.Fatalf("native constructor did not return the vendor error safely: %v\n%s", err, output)
 	}

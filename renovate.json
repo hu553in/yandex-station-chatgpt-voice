@@ -1,0 +1,40 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>hu553in/common-things//presets/renovate/go",
+    "github>hu553in/common-things//presets/renovate/python"
+  ],
+  "enabledManagers": ["custom.regex", "github-actions", "gomod", "pep621"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the pinned Zig compiler distributed through PyPI",
+      "managerFilePatterns": ["/^tools/build-arm\\.sh$/"],
+      "matchStrings": ["ZIG_VERSION=(?<currentValue>[^\\s]+)"],
+      "datasourceTemplate": "pypi",
+      "depNameTemplate": "ziglang",
+      "versioningTemplate": "pep440"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the Opus source version and verified archive checksum together",
+      "managerFilePatterns": ["/^tools/build-arm\\.sh$/"],
+      "matchStrings": [
+        "OPUS_VERSION=(?<currentValue>[^\\s]+)\\s+OPUS_SHA256=(?<currentDigest>[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "custom.opus",
+      "depNameTemplate": "opus",
+      "versioningTemplate": "loose",
+      "autoReplaceStringTemplate": "OPUS_VERSION={{{newValue}}}\nOPUS_SHA256={{{newDigest}}}"
+    }
+  ],
+  "customDatasources": {
+    "opus": {
+      "defaultRegistryUrlTemplate": "https://downloads.xiph.org/releases/opus/SHA256SUMS.txt",
+      "format": "plain",
+      "transformTemplates": [
+        "{\"releases\": releases[$contains(version, /^[a-f0-9]{64}  opus-[0-9]+\\.[0-9]+(?:\\.[0-9]+)?\\.tar\\.gz$/)].{\"version\": $match(version, /opus-(.*)\\.tar\\.gz/).groups[0], \"digest\": $substring(version, 0, 64)}}"
+      ]
+    }
+  }
+}
