@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,8 +16,11 @@ func TestRunOptions(t *testing.T) {
 		{"run", "--help"}, {"run", "--voice=-future", "-h"}, {"help"},
 	} {
 		var out, diagnostics bytes.Buffer
-		if err := Run(t.Context(), args, nil, &out, &diagnostics); err != nil || !strings.Contains(out.String(), "--backend-thinking-effort") {
+		if err := Run(t.Context(), args, &out, &diagnostics); err != nil || !strings.Contains(out.String(), "--backend-thinking-effort") {
 			t.Fatalf("help failed: %v %q", err, out.String())
+		}
+		if !strings.Contains(out.String(), "make login") {
+			t.Fatal("help lost the make login marker that the host preflight probes")
 		}
 	}
 	for _, args := range [][]string{
@@ -24,7 +28,7 @@ func TestRunOptions(t *testing.T) {
 		{"run", "--", "private-marker"}, {"run", "--voice=valid", "private-marker"},
 	} {
 		var out, diagnostics bytes.Buffer
-		err := Run(t.Context(), args, nil, &out, &diagnostics)
+		err := Run(t.Context(), args, &out, &diagnostics)
 		if err == nil || strings.Contains(err.Error()+out.String()+diagnostics.String(), "private-marker") {
 			t.Fatalf("invalid options accepted or disclosed: %v", err)
 		}
@@ -35,80 +39,46 @@ func TestRunOptions(t *testing.T) {
 	}
 }
 
-func TestAuthStatusCommand(t *testing.T) {
+func TestAuthCommandsRejectUnsupportedInput(t *testing.T) {
 	if _, err := os.Lstat(credentialPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("refusing to test auth status against an existing or inaccessible Station session")
+		t.Fatal("refusing to test auth commands against an existing or inaccessible Station session")
 	}
 	for _, args := range [][]string{
 		{"auth", "status", "private-marker"}, {"auth", "status", "--session-json=private-marker"},
+		{"auth", "import"}, {"auth", "import", "--session-json="}, {"auth"}, {"auth", "private-marker"},
 	} {
 		var out, diagnostics bytes.Buffer
-		err := Run(t.Context(), args, nil, &out, &diagnostics)
+		err := Run(t.Context(), args, &out, &diagnostics)
 		if err == nil || !strings.HasPrefix(err.Error(), "usage:") || strings.Contains(err.Error()+out.String()+diagnostics.String(), "private-marker") {
-			t.Fatalf("auth status accepted extra arguments or disclosed them: %v", err)
+			t.Fatalf("auth accepted unsupported arguments or disclosed them: %v", err)
 		}
 	}
-	if err := Run(t.Context(), []string{"auth", "status"}, nil, io.Discard, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "no imported session;") {
-		t.Fatalf("auth status did not reach the saved credential: %v", err)
+	for _, args := range [][]string{
+		{"auth", "import", "--session-json", "private-marker", "private-marker"},
+		{"auth", "import", "--private-marker"},
+	} {
+		var out, diagnostics bytes.Buffer
+		err := Run(t.Context(), args, &out, &diagnostics)
+		if err == nil || strings.Contains(err.Error()+out.String(), "private-marker") {
+			t.Fatalf("auth import accepted extra input or disclosed it: %v", err)
+		}
 	}
-}
-
-type failingPrompt struct{}
-
-func (failingPrompt) Write([]byte) (int, error) { return 0, errors.New("private writer details") }
-
-func TestHiddenInputRestorationAndFailures(t *testing.T) {
-	for _, action := range []string{"success", "restore", "read", "EOF", "cancel", "prompt"} {
-		t.Run(action, func(t *testing.T) {
-			in, input, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer in.Close()
-			defer input.Close()
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			switch action {
-			case "read":
-				in.Close()
-			case "EOF":
-				input.Close()
-			case "cancel":
-				cancel()
-			default:
-				if _, err := io.WriteString(input, "synthetic-token\n"); err != nil {
-					t.Fatal(err)
-				}
-			}
-			var output bytes.Buffer
-			var writer io.Writer = &output
-			if action == "prompt" {
-				writer = failingPrompt{}
-			}
-			restored := 0
-			token, err := readHiddenInput(ctx, in, writer, func() error {
-				restored++
-				if action == "restore" {
-					return errors.New("private restore details")
-				}
-				return nil
-			})
-			if restored != 1 || strings.Contains(output.String(), "synthetic-token") {
-				t.Fatal("input was echoed or restore was skipped")
-			}
-			if action == "success" {
-				if err != nil || string(token) != "synthetic-token" {
-					t.Fatal("hidden input failed", err)
-				}
-				clear(token)
-				return
-			}
-			if token != nil || err == nil || strings.Contains(err.Error(), "private") {
-				t.Fatal("failed input returned a token or unsafe error", err)
-			}
-			if wantCancel := action == "EOF" || action == "cancel"; errors.Is(err, context.Canceled) != wantCancel {
-				t.Fatal("I/O failure and cancellation were confused", err)
-			}
-		})
+	var out bytes.Buffer
+	err := Run(t.Context(), []string{"auth", "import", "--session-json", "/nonexistent/private-marker.json"}, &out, io.Discard)
+	if err == nil || err.Error() != "cannot open the selected sign-in file" || out.Len() != 0 {
+		t.Fatalf("missing sign-in file was not rejected with a fixed message: %v", err)
+	}
+	if err := Run(t.Context(), []string{"auth", "status"}, io.Discard, io.Discard); err != errNoSession {
+		t.Fatalf("auth status did not reach the saved session: %v", err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	out.Reset()
+	err = Run(canceled, []string{"auth", "import", "--session-json", filepath.Join("testdata", "browser-sign-in.json")}, &out, io.Discard)
+	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "interrupted") || strings.Contains(err.Error(), "was not changed") || out.Len() != 0 {
+		t.Fatalf("interrupted import could look successful to the host: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Dir(credentialPath())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("interrupted import created the Station app directory on this host")
 	}
 }

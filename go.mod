@@ -12,7 +12,6 @@ require (
 	github.com/pion/transport/v5 v5.1.1
 	github.com/pion/webrtc/v4 v4.2.25
 	golang.org/x/sys v0.49.0
-	golang.org/x/term v0.47.0
 	google.golang.org/protobuf v1.36.12
 )
 

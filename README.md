@@ -8,7 +8,7 @@ Station and connects directly to ChatGPT. Once it is running, the computer can d
 - **Hardware.** Tested only on Station Mini 2. It needs root access and the original Alice services.
 
 [Before you start](#1-check-the-station-and-chatgpt) · [Computer setup](#2-prepare-the-computer) ·
-[Install](#3-connect-and-install) · [Token](#4-add-your-chatgpt-token) ·
+[Install](#3-connect-and-install) · [Sign in](#4-sign-in-to-chatgpt) ·
 [First conversation](#5-check-a-conversation) · [Manage](#manage-the-client) ·
 [Settings](#change-the-voice-or-model) · [Troubleshooting](#troubleshooting)
 
@@ -31,9 +31,9 @@ Complete these checks before building anything:
    through the router. Allow LAN access in the computer's VPN and avoid guest Wi-Fi or client
    isolation.
 
-Use the same ChatGPT account for the browser check and token below. Available Voice access depends
-on the account and service. This client uses the website's unofficial voice protocol, which can
-change independently of this project.
+Use the same ChatGPT account for the browser check and the sign-in below. Available Voice access
+depends on the account and service. This client uses the website's unofficial voice protocol, which
+can change independently of this project.
 
 ## 2. Prepare the computer
 
@@ -80,6 +80,10 @@ For another Linux distribution, install Git, make, curl, tar, Python 3, pkg-conf
 Go 1.27.3 or later. Native Windows setup is not covered here.
 
 </details>
+
+`make login` opens [Google Chrome](https://www.google.com/chrome/) in a separate, empty window.
+Install Chrome if you do not have it. To use Chromium instead, see [sign in](#4-sign-in-to-chatgpt).
+The first `make login` downloads the Playwright library with uv. It does not download a browser.
 
 Download the project into a folder **without spaces in its path**. The Opus build cannot use a path
 with whitespace.
@@ -147,40 +151,55 @@ make install
 before replacing the installed client. It installs under `/data/yandex-station-chatgpt-voice/`,
 keeps the old binary as `client.previous`, and leaves the new client stopped.
 
-## 4. Add your ChatGPT token
+## 4. Sign in to ChatGPT
 
-The token lets the Station use your signed-in ChatGPT account. **Treat it like a password.** Keep it
-out of shell commands, screenshots, logs, Git, and messages to other people. An OpenAI API key does
-not work here.
-
-### Copy the token from Chrome
-
-1. Open [chatgpt.com](https://chatgpt.com/) and sign in to the account checked in step 1.
-2. Open Developer Tools with **Cmd+Option+I** on Mac or **Ctrl+Shift+I** on Linux. Select
-   **Network**. Leave it recording before the next step.
-3. Start a voice conversation in ChatGPT. In Network's filter field, enter `realtime/wm`.
-4. Select a **POST** request containing `/realtime/wm`. Under **Headers → Request Headers**, find
-   `Authorization`. Copy the complete value **after** `Bearer `, without that prefix.
-5. Stop the browser's voice conversation. Keep the token private while importing it below.
-
-If the request is missing, clear the filter, confirm that Network is recording, and start a new
-voice conversation with Developer Tools already open. Header inspection is described in
-[Chrome's Network reference](https://developer.chrome.com/docs/devtools/network/reference#headers).
-
-### Import the token and start the client
-
-In the project terminal, **type this command by hand**. Copying it would replace the token on your
-clipboard:
+The Station needs your ChatGPT sign-in. You sign in once in a browser on the computer. After that,
+the Station keeps the session fresh by itself.
 
 ```sh
-make auth
+make login
 ```
 
-At `ChatGPT web access token (hidden):`, paste the token and press **Enter**. No characters appear
-while you paste. Wait for `Session imported.` before continuing. The token is saved at
-`/data/yandex-station-chatgpt-voice/session.json` with private file permissions. **Network ADB has
-no key authentication on the tested firmware. Anyone who can reach port 5555 on the LAN can read the
-token. Keep that port inside a trusted LAN.**
+1. The command checks the Station first. Then a new Chrome window opens on the ChatGPT sign-in page.
+   This window uses a fresh, empty profile, so it starts signed out even if your usual Chrome is
+   signed in.
+2. Sign in there with the account you checked in step 1. Passwords, codes, and Google or Apple
+   sign-in all happen in that window. Nothing is typed into the terminal.
+3. When your chats appear, return to the terminal and press **Enter**. If the sign-in is not
+   finished yet, the command asks you to finish and press Enter again.
+4. Wait. The Chrome window closes by itself.
+
+**Checkpoint:** `Signed in. The Station saved a renewable ChatGPT session` appears.
+
+Before submitting your sign-in, cancel with **Ctrl+C** in the terminal, or close Chrome and then
+return to the terminal and press **Enter**. The Station stays unchanged. After submission, an
+interrupted command may already have saved the session. Run `make status` before retrying.
+
+The helper keeps only ChatGPT's session cookies from that window, then deletes the window's
+temporary profile. It uploads the cookies to the Station. The Station then asks ChatGPT for an
+access token over its own network, and saves the cookies and token at
+`/data/yandex-station-chatgpt-voice/session.json` with private file permissions. **Treat the saved
+session like a password.** Keep it out of screenshots, logs, Git, and messages to other people.
+**Network ADB has no key authentication on the tested firmware. Anyone who can reach port 5555 on
+the LAN can read the saved session. Keep that port inside a trusted LAN.**
+
+<details>
+<summary>Use Chromium or Chrome from another location</summary>
+
+Add the browser program's full path to `config.mk`. Spaces in the path need no quotes:
+
+```make
+CHROME = /usr/bin/chromium
+```
+
+On macOS the program is inside the app, for example
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. On Ubuntu, the snap version of
+Chromium may fail to start from this tool. If it does, install Google Chrome from its `.deb`
+package.
+
+</details>
+
+Start the client:
 
 ```sh
 make start
@@ -200,8 +219,9 @@ ChatGPT access.
 
 1. Say **"Яндекс"** on its own. Wait for the short high tone.
 2. After the tone, say **"Сосчитай от одного до десяти"**. Check that the whole answer is audible.
-3. Say **"Заверши разговор"**. A low tone marks normal completion. The goodbye can currently be cut
-   short before that tone.
+3. Say **"Заверши разговор"**. A low tone marks normal completion. The client passes queued audio to
+   the speaker first. The last fraction of a second can still be cut by the audio device or by
+   ChatGPT ending before sending its tail.
 4. Say **"Алиса, сколько будет два плюс два?"**. Check that the original assistant still answers.
 
 **Ready:** both assistants work. You can close the terminal and disconnect the computer. Audio
@@ -214,7 +234,8 @@ cd ~/Projects/yandex-station-chatgpt-voice
 make connect start
 ```
 
-There is no automatic startup after a reboot. If the address changed, update `STATION_IP` first.
+Automatic startup is off until you [enable it below](#start-after-a-station-reboot). If the address
+changed, update `STATION_IP` first.
 
 ## Manage the client
 
@@ -225,44 +246,74 @@ cd ~/Projects/yandex-station-chatgpt-voice
 make connect
 ```
 
-| Command        | Action                                                               |
-| -------------- | -------------------------------------------------------------------- |
-| `make status`  | Inspect root, files, process, runtime files, and saved token expiry. |
-| `make start`   | Start the installed client. Leave an already running client alone.   |
-| `make stop`    | Stop ChatGPT. Keep Alice available.                                  |
-| `make restart` | Stop and start the client. Apply a new token or settings.            |
-| `make logs`    | Follow the client log. Ctrl+C stops following, not the client.       |
+| Command         | Action                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------- |
+| `make status`   | Inspect root, files, process, runtime files, and saved token expiry.                   |
+| `make start`    | Start the installed client. Leave an already running client alone.                     |
+| `make stop`     | Stop ChatGPT and pause boot startup until `make start`. Keep Alice available.          |
+| `make restart`  | Stop and start the client. Apply new settings.                                         |
+| `make login`    | Sign in again. A running client uses the new session from its next call.               |
+| `make rollback` | Restore the saved previous binary and leave it stopped. Keep the session and settings. |
+| `make logs`     | Follow the client log. Ctrl+C stops following, not the client.                         |
 
 Logs use **UTC timestamps** and live at `/tmp/yandex-station-chatgpt-voice.log`. Ctrl+C in the log
 viewer can print `Canceled`; the client keeps running. For an ADB shell, run `make shell`. For the
 full command list, run `make help`.
 
-### Replace an expired token
+Worker output rotates between the log and its `.1` file, with 512 KiB per segment. If a running
+`make logs` stops showing new entries after rotation, close it with Ctrl+C and run it again.
 
-Copy a fresh token using [the Chrome steps above](#copy-the-token-from-chrome). Type the following
-command by hand to keep the token on your clipboard:
+### Start after a Station reboot
 
-```sh
-make auth && make restart
-```
-
-No rebuild or reinstall is needed. The client reads the token at startup, so importing alone does
-not change the token in a running process. Tokens are not refreshed automatically.
-
-`make status` shows the saved token's expiry in UTC, with `expired` when that time has passed. This
-is **unverified metadata**, not proof that ChatGPT accepts the token. An opaque token or unavailable
-expiry shows `unknown`. The token itself is not printed.
-
-<details>
-<summary>Import a session JSON file instead of pasting a token</summary>
-
-The file must contain an `accessToken` string. Keep it private. Use its absolute path:
+First complete a conversation using `make start`. Then enable boot startup:
 
 ```sh
-make auth SESSION_JSON=/absolute/path/to/session.json && make restart
+make enable-autostart
+make status
 ```
 
-</details>
+**Checkpoint:** `Boot scripts recognized.` and `Autostart enabled.` appear. This installs one init
+script on the tested Mini 2 boot layout. Other boot layouts are refused. It uses the settings saved
+by your last `make start` or `make restart` and starts wake detection, not a conversation.
+
+- `make stop`, `make install`, and `make rollback` pause startup across reboot. Run `make start` to
+  resume it.
+- `make disable-autostart` removes the boot hook and keeps the current process running.
+- A retained mutation lock makes boot startup skip the client. Resolve the interrupted operation
+  before removing that lock.
+
+### Return to the previous build
+
+```sh
+make rollback start
+```
+
+`rollback` keeps `client.previous`, so repeating it leaves you on the same build. Installing an
+identical build also keeps the previous binary. To return to this checkout's build, run
+`make install restart`. An older build may use the legacy launcher without process recovery.
+
+A build from before browser sign-in still reads the saved access token, but it never renews it. It
+works until that token expires. `make login` refuses such a build. Run `make install` first.
+
+### How the session stays fresh
+
+Before each call, right after "Яндекс", the client checks the saved access token. If the token has
+24 hours or less remaining, or its expiry cannot be read, the client renews it once from ChatGPT. It
+saves the new token and cookies, then continues the call. This adds one short HTTPS request before
+the high tone, only on calls that need renewal. The client has no background timer and never retries
+a failed renewal. After a failed renewal it does not fall back to the old token. That call ends with
+a log message, and wake detection rearms for the next "Яндекс".
+
+`make status` shows the saved token's expiry in UTC, with `expired` when that time has passed. An
+expired token is normal between calls; the next call renews it. The expiry is **unverified
+metadata**, not proof that ChatGPT accepts the session. An opaque token or unavailable expiry shows
+`unknown`. The token itself is not printed.
+
+### Sign in again
+
+Run `make login` again when the log says `run make login`. This happens, for example, after you sign
+out of ChatGPT on all devices or change your password. No rebuild, reinstall, or restart is needed:
+a running client uses the new session from its next call.
 
 ### Update the client
 
@@ -272,8 +323,18 @@ In the project folder, run:
 git pull --ff-only && make install restart
 ```
 
-This builds, installs, and starts the updated client. The saved token is preserved. If `git pull`
+This builds, installs, and starts the updated client. The saved session is preserved. If `git pull`
 refuses local changes, inspect them before replacing anything.
+
+**Updating from a version that used `make auth`:** its saved token cannot renew, so sign in once
+with the browser before starting:
+
+```sh
+git pull --ff-only && make install && make login && make start
+```
+
+Until you do, `make start` reports `Client exited during startup` and `make logs` shows
+`saved session predates browser sign-in; run make login on the computer`.
 
 ## Change the voice or model
 
@@ -286,7 +347,7 @@ BACKEND_MODEL = gpt-6-thinking
 BACKEND_THINKING_EFFORT = extended
 ```
 
-Save the file, then run `make restart`. No rebuild, reinstall, or token import is needed.
+Save the file, then run `make restart`. No rebuild, reinstall, or new sign-in is needed.
 
 - Missing or exactly empty values use the defaults.
 - `BACKEND_THINKING_EFFORT = disabled` omits the thinking-effort parameter. Only that exact value
@@ -324,11 +385,15 @@ transported. See [config.example.mk](config.example.mk) for build and tool overr
   failure or closed control channel ends the call. There is no automatic new call.
 - **Completion tone.** Only a decoded ChatGPT hangup produces the low tone. A transport failure ends
   the call without that tone. Say "Яндекс" again when ready for a new call.
+- **Process recovery.** A supervisor can restart a failed client twice, waiting five seconds before
+  each attempt. Each replacement waits for "Яндекс". A normal hangup or rejected web session does
+  not trigger a new call. A missing, invalid, or pre-sign-in saved session stops recovery; run
+  `make login`.
 
 ## Troubleshooting
 
 Run `make status` and `make logs` first. Logs can contain conversation diagnostics. Review them
-before sharing, and never share a token or a session file.
+before sharing, and never share a session file, sign-in cookies, or a token.
 
 <details>
 <summary>ADB cannot connect, or ADB command failed</summary>
@@ -353,26 +418,31 @@ Station has the same network access. `status` is not a ChatGPT connection test.
 <details>
 <summary>Client stopped, or Station audio reports i/o timeout</summary>
 
-A native audio fault stops the client. It does not restart automatically. Inspect `make logs`, run
-`make restart`, wait more than three seconds, then run `make status` again. The audio service can
-connect without delivering audio. An initial `Yandex wake detection armed.` message alone does not
-prove capture works.
+A native audio fault stops the worker. The supervisor tries at most two replacements, then stops.
+Inspect `make logs`, run `make restart`, wait more than three seconds, then run `make status` again.
+The audio service can connect without delivering audio. An initial `Yandex wake detection armed.`
+message alone does not prove capture works.
 
 </details>
 
 <details>
-<summary>Token import fails, or the service returns 401, 403, 400, or 422</summary>
+<summary>Sign-in fails, or the service returns 401, 403, 400, or 422</summary>
 
-| Error                                                       | Next action                                                                                         |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `make auth` reports `Station command failed (1).`           | Check `make status` for an installed client. Copy the token again, without `Bearer ` or an API key. |
-| `Access token exceeds 32768 bytes.` or the ASCII-text error | Copy only the token after `Bearer ` from the Authorization header.                                  |
-| `401` or expired session                                    | Run `make auth` with a fresh browser token, then `make restart`.                                    |
-| `403` or connection setup failure                           | Check browser Voice access and the Station's network. This need not mean expiry.                    |
-| `400`, `422`, or session error                              | Restore the voice settings to defaults, restart, and check service compatibility.                   |
+| Error                                                       | Next action                                                                                  |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `Install the client first` or `cannot use browser sign-in`  | Run `make install`, then `make login` again.                                                 |
+| `Cannot start Chrome` or `CHROME must be the full path`     | Install Google Chrome, or set `CHROME` as described in [sign in](#4-sign-in-to-chatgpt).     |
+| `No ChatGPT sign-in found yet`                              | Finish signing in until your chats appear in that window, then press Enter again.            |
+| Google says the browser or app may not be secure            | Try another sign-in method that ChatGPT offers in that window.                               |
+| `edge challenged session renewal` or `HTTPS request failed` | The Station itself cannot reach ChatGPT's sign-in service. Check its network route (step 1). |
+| `session renewal timed out`                                 | The Station's network was slow. Say "Яндекс" again, and check the network if it repeats.     |
+| `run make login`, `ended the saved web session`, or `401`   | Run `make login`. A running client uses the new session from its next call.                  |
+| `403` during a call, or connection setup failure            | Check browser Voice access and the Station's network. This need not mean expiry.             |
+| `400`, `422`, or session error                              | Restore the voice settings to defaults, restart, and check service compatibility.            |
 
-Rejected sessions log a status or fixed error without the rejected value or response body. Detection
-rearms for a fresh wake word. The client does not automatically retry signaling.
+`make login` shows the Station's error after `Station command failed (1).` Rejected sessions log a
+status or fixed error without the rejected value, cookies, or response body. Detection rearms for a
+fresh wake word. The client does not automatically retry renewal or signaling.
 
 </details>
 
@@ -382,8 +452,8 @@ rearms for a fresh wake word. The client does not automatically retry signaling.
 For missing runtime files, stop. The client needs the firmware's audio services, libraries, and
 Yandex wake-word model. Other firmware layouts are not supported by the current code.
 
-For a mutation lock, confirm no install, token import, start, or stop is running. Inspect filenames
-and permissions without printing the token:
+For a mutation lock, confirm no install, sign-in, start, or stop is running. Inspect filenames and
+permissions without printing the saved session:
 
 ```sh
 make shell
@@ -398,8 +468,8 @@ exit
 ```
 
 An uncertain operation retains remote scripts, staging files, and the lock. Retained `.auth-*` files
-contain a token. Keep them private. Check `make status` and `make logs` to confirm the previous
-operation's outcome. If that is unclear, keep the files and lock rather than retrying.
+contain ChatGPT sign-in cookies. Keep them private. Check `make status` and `make logs` to confirm
+the previous operation's outcome. If that is unclear, keep the files and lock rather than retrying.
 
 Only after confirming the outcome and that no mutation command is still running, open `make shell`
 again and clear the leftover staging files and stale lock:
@@ -428,18 +498,19 @@ For older Go, install Go 1.27.3 or later.
 
 ## Remove the client
 
-**This deletes the saved token and previous binary as well as the client.** Stop it and open the
+**This deletes the saved session and previous binary as well as the client.** Stop it and open the
 Station shell:
 
 ```sh
-make stop shell
+make disable-autostart stop shell
 ```
 
 Run the following **inside that shell**, then return to the computer:
 
 ```sh
 rm -rf /data/yandex-station-chatgpt-voice \
-  /tmp/yandex-station-chatgpt-voice /tmp/yandex-station-chatgpt-voice.log
+  /tmp/yandex-station-chatgpt-voice /tmp/yandex-station-chatgpt-voice.log \
+  /tmp/yandex-station-chatgpt-voice.log.1
 exit
 ```
 
@@ -462,14 +533,25 @@ sudo apt-get install -y build-essential libopus-dev
 
 Then run `make check`. It checks formatting, helper syntax, local launch behavior, Go race tests,
 and `go vet` without contacting a Station. Local Pion tests drop and restore virtual packets with
-production callbacks.
+production callbacks. Session renewal tests use a local HTTPS server, never ChatGPT.
+
+`make check` does not need a browser. To drive installed Chrome through the sign-in helper against a
+synthetic local page, with no account and no ChatGPT traffic, run:
+
+```sh
+STATION_BROWSER_TEST=1 python3 -B -m unittest discover -s tools -p 'test_browser_login.py'
+```
+
+Add `STATION_BROWSER_HEADED=1` to watch the window, or `CHROME=/path/to/chrome` to test another
+browser. This proves the browser handling only, not a real ChatGPT sign-in.
 
 - `make build` targets Linux ARMv7 with the hard-float ABI. The pinned Zig compiler and static ARM
   Opus library live under `.cache/`.
 - `make fmt` formats Go files. `make clean` removes `build/` and keeps the toolchain cache, local
-  configuration, and the Station's saved token.
+  configuration, and the Station's saved session.
 
 ## Credits
 
 The protocol work uses [chatgpt-web-voice](https://github.com/dyhhhhhh/chatgpt-web-voice) as a
-reference.
+reference. Terminal event handling also uses
+[Alisa ChatGPT Voice](https://github.com/rison1337/Alisa-ChatGPT-voice-assistant) as a reference.

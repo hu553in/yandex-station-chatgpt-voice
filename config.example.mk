@@ -4,7 +4,7 @@ STATION_IP =
 
 # Optional startup values. Missing or exactly empty uses these defaults.
 # Run make restart to apply changes; make start leaves a running client alone.
-# No rebuild or token import is needed. Names pass unchanged to ChatGPT.
+# No rebuild or new sign-in is needed. Names pass unchanged to ChatGPT.
 # VOICE = orbit
 # BACKEND_MODEL = gpt-6-thinking
 # BACKEND_THINKING_EFFORT = extended
@@ -13,6 +13,9 @@ STATION_IP =
 # This is Make source. Use $$ for a dollar and \# for a literal hash.
 # Quotes are data.
 
+# make login opens installed Google Chrome. For Chromium or another Chrome
+# location, give the program's full path. Spaces need no quotes.
+# CHROME = /usr/bin/chromium
 # GO = go
 # UV = uv
 # PYTHON = python3

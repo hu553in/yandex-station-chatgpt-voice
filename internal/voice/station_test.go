@@ -175,7 +175,7 @@ func TestStationRearmsAfterCallFailureAndWaitsForAlice(t *testing.T) {
 	go func() {
 		defer close(returned)
 		count := 0
-		done <- serveStation(ctx, client, credential{}, &output, func(e *stationEpoch, _ *stationGate, _ credential) error {
+		done <- serveStation(ctx, client, &output, func(e *stationEpoch, _ *stationGate) error {
 			count++
 			attempts <- e
 			if count == 1 {
@@ -282,14 +282,14 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 				done := make(chan error, 1)
 				var output bytes.Buffer
 				go func() {
-					done <- serveStation(ctx, client, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, &output, func(e *stationEpoch, gate *stationGate, auth credential) error {
+					done <- serveStation(ctx, client, &output, func(e *stationEpoch, gate *stationGate) error {
 						armed <- struct{}{}
 						select {
 						case <-e.ctx.Done():
 							return context.Cause(e.ctx)
 						case <-wake:
 						}
-						_, err := exchangeOffer(e.ctx, httpClient, auth, "v=0\r\n", []byte(`{}`))
+						_, err := exchangeOffer(e.ctx, httpClient, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, "v=0\r\n", []byte(`{}`))
 						if err == nil {
 							err = controlFailure
 						}
@@ -369,10 +369,10 @@ func TestStationExpectedCancellationIsQuiet(t *testing.T) {
 			done := make(chan error, 1)
 			var output bytes.Buffer
 			go func() {
-				done <- serveStation(ctx, client, credential{}, &output, func(e *stationEpoch, _ *stationGate, _ credential) error {
+				done <- serveStation(ctx, client, &output, func(e *stationEpoch, _ *stationGate) error {
 					armed <- e
 					<-e.ctx.Done()
-					return runCall(e, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, newStationCapture(e), sessionSettings{})
+					return runCall(e, filepath.Join(t.TempDir(), "session.json"), newStationCapture(e), sessionSettings{})
 				}, func(context.Context) error {
 					t.Error("canceled attempt produced a completion cue")
 					return nil
@@ -432,7 +432,7 @@ func TestStationCleanupSurvivesAliceAndParentCancellation(t *testing.T) {
 				done := make(chan error, 1)
 				attempts := 0
 				go func() {
-					done <- serveStation(ctx, client, credential{}, io.Discard, func(e *stationEpoch, gate *stationGate, _ credential) error {
+					done <- serveStation(ctx, client, io.Discard, func(e *stationEpoch, gate *stationGate) error {
 						attempts++
 						if parentCanceled {
 							cancel()
@@ -476,7 +476,7 @@ func TestCompletionCueDiagnostic(t *testing.T) {
 			var output bytes.Buffer
 			go func() {
 				attempts := 0
-				done <- serveStation(ctx, client, credential{}, &output, func(e *stationEpoch, _ *stationGate, _ credential) error {
+				done <- serveStation(ctx, client, &output, func(e *stationEpoch, _ *stationGate) error {
 					attempts++
 					if attempts == 1 {
 						return nil
@@ -512,7 +512,7 @@ func TestStationNativeAudioFaultIsTerminal(t *testing.T) {
 	defer server.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- serveStation(ctx, client, credential{}, io.Discard, func(*stationEpoch, *stationGate, credential) error {
+		done <- serveStation(ctx, client, io.Discard, func(*stationEpoch, *stationGate) error {
 			return voiceCallError{fmt.Errorf("%w: capture stalled", errStationAudio)}
 		}, func(context.Context) error {
 			t.Error("native audio failure produced a completion cue")
@@ -552,7 +552,7 @@ func TestStationAliceTakeoverCleanupFaultIsTerminal(t *testing.T) {
 	go func() {
 		defer close(returned)
 		var got result
-		got.err = serveStation(ctx, client, credential{}, io.Discard, func(e *stationEpoch, gate *stationGate, _ credential) error {
+		got.err = serveStation(ctx, client, io.Discard, func(e *stationEpoch, gate *stationGate) error {
 			got.attempts++
 			if got.attempts > 1 {
 				return errors.New("unexpected retry after native audio cleanup failure")
@@ -650,7 +650,7 @@ func TestStationCompletionYieldsToAliceAndRearms(t *testing.T) {
 	go func() {
 		defer close(returned)
 		count := 0
-		done <- serveStation(ctx, client, credential{}, io.Discard, func(e *stationEpoch, _ *stationGate, _ credential) error {
+		done <- serveStation(ctx, client, io.Discard, func(e *stationEpoch, _ *stationGate) error {
 			count++
 			attempts <- e
 			if count == 1 {

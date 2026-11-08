@@ -43,15 +43,16 @@ type peer struct {
 	report    *log.Logger
 	failureMu sync.Mutex
 	failure   error
+	abort     context.CancelCauseFunc
 }
 
-func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrtc.ICEServer, report *log.Logger) (*peer, error) {
+func newPeer(ctx context.Context, settings webrtc.SettingEngine, servers []webrtc.ICEServer, report *log.Logger, abort context.CancelCauseFunc) (*peer, error) {
 	settings.SetSCTPMaxMessageSize(maxMessageBytes)
 	settings.SetSCTPMaxReceiveBufferSize(maxSCTPReceiveBufferBytes)
 	settings.LoggerFactory = &logging.DefaultLoggerFactory{Writer: io.Discard, DefaultLogLevel: logging.LogLevelDisabled}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settings))
 	ctx, cancel := context.WithCancelCause(ctx)
-	p := &peer{report: report, ctx: ctx, cancel: cancel, ready: make(chan struct{}), tracks: make(chan *webrtc.TrackRemote, 1)}
+	p := &peer{report: report, ctx: ctx, cancel: cancel, ready: make(chan struct{}), tracks: make(chan *webrtc.TrackRemote, 1), abort: abort}
 	var err error
 	p.pc, err = api.NewPeerConnection(webrtc.Configuration{ICEServers: servers, BundlePolicy: webrtc.BundlePolicyMaxBundle})
 	if err != nil {
@@ -157,6 +158,9 @@ func (p *peer) fail(err error) {
 		p.failure = err
 	}
 	p.failureMu.Unlock()
+	if p.abort != nil {
+		p.abort(err)
+	}
 	p.cancel(err)
 }
 
@@ -187,7 +191,7 @@ func (p *peer) outcome(result error) error {
 }
 
 func (p *peer) handleMessage(data []byte) {
-	if p.ctx.Err() != nil {
+	if p.ctx.Err() != nil && context.Cause(p.ctx) != errProtocolHangup {
 		return
 	}
 	ev, err := decodeEvent(data)
@@ -241,9 +245,12 @@ func (p *peer) accept(answer string) error {
 	return nil
 }
 
+var callClient = signalingClient
+
 func signalingClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	transport.MaxResponseHeaderBytes = maxSessionResponseBytes
 	return &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
@@ -291,7 +298,7 @@ func exchangeOffer(ctx context.Context, client *http.Client, auth credential, of
 	defer response.Body.Close()
 	switch response.StatusCode {
 	case http.StatusUnauthorized:
-		return "", errors.New("ChatGPT session expired or rejected (401); run yandex-station-chatgpt-voice auth import with a fresh own web access token, then restart the client")
+		return "", errors.New("ChatGPT rejected the web session (401); run make login on the computer")
 	case http.StatusForbidden:
 		return "", errors.New("ChatGPT rejected voice access (403); account entitlement or edge restrictions may prevent this native client")
 	case http.StatusOK, http.StatusCreated:
@@ -315,7 +322,7 @@ func exchangeOffer(ctx context.Context, client *http.Client, auth credential, of
 	return sdp + "\r\n", nil
 }
 
-func runCall(e *stationEpoch, auth credential, capture *stationCapture, settings sessionSettings) (result error) {
+func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, settings sessionSettings) (result error) {
 	defer func() {
 		switch result {
 		case nil, errAlicePriority, context.Canceled:
@@ -329,23 +336,51 @@ func runCall(e *stationEpoch, auth credential, capture *stationCapture, settings
 			result = voiceCallError{result}
 		}
 	}()
-	if !validCredential(auth) {
-		return errors.New("invalid web credential")
-	}
 	if !e.allowed() {
 		return context.Cause(e.ctx)
 	}
-	ctx := e.ctx
-	var workers sync.WaitGroup
-	p, err := newPeer(ctx, webrtc.SettingEngine{}, []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302", "stun:stun4.l.google.com:19302"}}}, e.report)
+	client := callClient()
+	defer client.CloseIdleConnections()
+	renewCtx, stopRenew := context.WithTimeoutCause(e.ctx, renewTimeout, errRenewTimeout)
+	auth, err := sessionForCall(renewCtx, sessionFile, client, e.report)
+	stopRenew()
 	if err != nil {
 		return err
+	}
+	ctx := e.ctx
+	var workers sync.WaitGroup
+	p, err := newPeer(ctx, webrtc.SettingEngine{}, []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302", "stun:stun4.l.google.com:19302"}}}, e.report, e.revoke)
+	if err != nil {
+		return err
+	}
+	ctx = p.ctx
+	playbackOpened := false
+	complete := func(cause error) error {
+		if cause != errProtocolHangup {
+			return cause
+		}
+		capture.beginDraining()
+		workers.Wait()
+		cleanup := p.close()
+		if failure := p.outcome(errProtocolHangup); failure != nil {
+			return errors.Join(failure, cleanup)
+		}
+		if cleanup != nil {
+			return cleanup
+		}
+		if playbackOpened {
+			e.report.Print("Voice call ended by ChatGPT; finishing received audio.")
+			if err := e.output.finish(e.ctx); err != nil {
+				return err
+			}
+		}
+		return errProtocolHangup
 	}
 	shutdown := sync.OnceValue(func() error {
 		e.revoke(context.Canceled)
 		return errors.Join(e.output.close(), p.close())
 	})
-	stopShutdown := context.AfterFunc(ctx, func() { _ = shutdown() })
+	stopShutdown := context.AfterFunc(e.ctx, func() { _ = shutdown() })
 	defer func() {
 		e.revoke(context.Canceled)
 		cleanupErr := shutdown()
@@ -356,7 +391,11 @@ func runCall(e *stationEpoch, auth credential, capture *stationCapture, settings
 			result = errors.Join(result, cleanupErr)
 		}
 	}()
-	stopPeerCancel := context.AfterFunc(p.ctx, func() { e.revoke(context.Cause(p.ctx)) })
+	stopPeerCancel := context.AfterFunc(p.ctx, func() {
+		if cause := context.Cause(p.ctx); cause != errProtocolHangup {
+			e.revoke(cause)
+		}
+	})
 	defer stopPeerCancel()
 	setupCtx, finishSetup := context.WithTimeout(ctx, setupTimeout)
 	defer finishSetup()
@@ -368,20 +407,18 @@ func runCall(e *stationEpoch, auth credential, capture *stationCapture, settings
 	defer stopSetupTimeout()
 	offer, err := p.offer(setupCtx)
 	if err != nil {
-		return err
+		return complete(err)
 	}
 	session, err := encodeSession(time.Now(), settings)
 	if err != nil {
 		return errors.New("cannot encode voice session")
 	}
-	client := signalingClient()
-	defer client.CloseIdleConnections()
 	answer, err := exchangeOffer(setupCtx, client, auth, offer, session)
 	if err != nil {
-		return err
+		return complete(err)
 	}
-	if !e.allowed() {
-		return context.Cause(ctx)
+	if ctx.Err() != nil {
+		return complete(context.Cause(ctx))
 	}
 	if err = p.accept(answer); err != nil {
 		return err
@@ -391,15 +428,15 @@ func runCall(e *stationEpoch, auth credential, capture *stationCapture, settings
 		select {
 		case <-setupCtx.Done():
 			if ctx.Err() != nil {
-				return context.Cause(ctx)
+				return complete(context.Cause(ctx))
 			}
 			return errors.New("voice connection setup timed out")
 		case <-p.ready:
 			ready = true
 		}
 	}
-	if !e.allowed() {
-		return context.Cause(ctx)
+	if ctx.Err() != nil {
+		return complete(context.Cause(ctx))
 	}
 	if setupCtx.Err() != nil {
 		return errors.New("voice setup ended before media became ready")
@@ -407,17 +444,18 @@ func runCall(e *stationEpoch, auth credential, capture *stationCapture, settings
 	if err = e.output.open(); err != nil {
 		return err
 	}
-	if !e.allowed() {
-		return context.Cause(ctx)
+	playbackOpened = true
+	if ctx.Err() != nil {
+		return complete(context.Cause(ctx))
 	}
 	if setupCtx.Err() != nil {
 		return errors.New("voice setup ended while opening playback")
 	}
 	if err = playCue(setupCtx, 880); err != nil {
-		return err
+		return complete(err)
 	}
 	if err = capture.beginStreaming(setupCtx); err != nil {
-		return err
+		return complete(err)
 	}
 	finishSetup()
 	e.report.Print("Voice media ready.")
@@ -429,7 +467,7 @@ func runCall(e *stationEpoch, auth credential, capture *stationCapture, settings
 	for {
 		select {
 		case <-ctx.Done():
-			return context.Cause(ctx)
+			return complete(context.Cause(ctx))
 		case track := <-p.tracks:
 			workers.Go(func() {
 				if err := e.output.receive(ctx, track); err != nil {

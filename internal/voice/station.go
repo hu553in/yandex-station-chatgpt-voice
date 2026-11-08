@@ -136,6 +136,7 @@ const (
 	captureDetecting capturePhase = iota
 	captureConnecting
 	captureStreaming
+	captureDraining
 )
 
 type stationCapture struct {
@@ -194,7 +195,7 @@ func (c *stationCapture) pushPCM(pcm []byte) error {
 	if !c.epoch.allowed() {
 		return context.Cause(c.epoch.ctx)
 	}
-	if c.phase == captureConnecting {
+	if c.phase == captureConnecting || c.phase == captureDraining {
 		return nil
 	}
 	output := c.detector
@@ -223,10 +224,16 @@ func (c *stationCapture) pushPCM(pcm []byte) error {
 	return nil
 }
 
-func runStation(parent context.Context, credentialFile string, settings sessionSettings, out io.Writer) error {
-	auth, err := loadCredential(credentialFile)
-	if err != nil {
-		return err
+func (c *stationCapture) beginDraining() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.phase = captureDraining
+	c.used = 0
+}
+
+func runStation(parent context.Context, sessionFile string, settings sessionSettings, out io.Writer) error {
+	if _, err := readSessionFile(sessionFile); err != nil {
+		return configError{err}
 	}
 	conn, err := dialStation(parent, "127.0.0.1:9875")
 	if err != nil {
@@ -235,12 +242,12 @@ func runStation(parent context.Context, credentialFile string, settings sessionS
 		}
 		return errors.New("cannot connect to native Alice state")
 	}
-	return serveStation(parent, conn, auth, out, func(e *stationEpoch, gate *stationGate, auth credential) error {
-		return runStationEpoch(e, gate, auth, settings)
+	return serveStation(parent, conn, out, func(e *stationEpoch, gate *stationGate) error {
+		return runStationEpoch(e, gate, sessionFile, settings)
 	}, playEndCue)
 }
 
-func serveStation(parent context.Context, conn net.Conn, auth credential, out io.Writer, attempt func(*stationEpoch, *stationGate, credential) error, endCue func(context.Context) error) error {
+func serveStation(parent context.Context, conn net.Conn, out io.Writer, attempt func(*stationEpoch, *stationGate) error, endCue func(context.Context) error) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	gate := newStationGate()
@@ -263,7 +270,7 @@ func serveStation(parent context.Context, conn net.Conn, auth credential, out io
 		}
 		if epoch := gate.begin(ctx); epoch != nil {
 			epoch.report = report
-			err := attempt(epoch, gate, auth)
+			err := attempt(epoch, gate)
 			var cue *stationEpoch
 			if err == nil {
 				cue = gate.completion(ctx, epoch)
@@ -311,7 +318,7 @@ func serveStation(parent context.Context, conn net.Conn, auth credential, out io
 	}
 }
 
-func runStationEpoch(e *stationEpoch, gate *stationGate, auth credential, settings sessionSettings) (result error) {
+func runStationEpoch(e *stationEpoch, gate *stationGate, sessionFile string, settings sessionSettings) (result error) {
 	detector, err := newNativeSpotter()
 	if err != nil {
 		return err
@@ -367,7 +374,7 @@ func runStationEpoch(e *stationEpoch, gate *stationGate, auth credential, settin
 				return err
 			}
 			e.report.Print("Yandex wake confirmed; connecting voice.")
-			err = runCall(e, auth, capture, settings)
+			err = runCall(e, sessionFile, capture, settings)
 			if cause := context.Cause(e.ctx); errors.Is(cause, errStationAudio) && !errors.Is(err, errStationAudio) {
 				return errors.Join(cause, err)
 			}

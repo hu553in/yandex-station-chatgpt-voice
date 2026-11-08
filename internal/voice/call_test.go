@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,7 +49,7 @@ func TestFixedOriginSignalingAndFailures(t *testing.T) {
 	}{
 		{"ok", 200, "v=0\r\ns=test\r\n", ""},
 		{"created", 201, "v=0\ns=test\n", ""},
-		{"unauthorized", 401, private, "auth import"},
+		{"unauthorized", 401, private, "make login"},
 		{"forbidden", 403, private, "entitlement"},
 		{"quota", 429, private, "429"},
 		{"bad settings", 400, private, "400"},
@@ -113,9 +114,6 @@ func TestFixedOriginSignalingAndFailures(t *testing.T) {
 			} else if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), private) {
 				t.Fatalf("unsafe or wrong error: %v", err)
 			}
-			if tc.status == 401 && !strings.Contains(err.Error(), "restart the client") {
-				t.Fatal("expired-session recovery omitted the restart")
-			}
 			if requests != 1 {
 				t.Fatal("redirect or retry performed")
 			}
@@ -167,7 +165,7 @@ func localPeer(t *testing.T, ctx context.Context) *peer {
 	settings.SetIncludeLoopbackCandidate(true)
 	settings.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-	p, err := newPeer(ctx, settings, nil, log.New(io.Discard, "", 0))
+	p, err := newPeer(ctx, settings, nil, log.New(io.Discard, "", 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +233,7 @@ func TestCancellationDuringICEGathering(t *testing.T) {
 	settings.SetIncludeLoopbackCandidate(true)
 	settings.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-	p, err := newPeer(t.Context(), settings, []webrtc.ICEServer{{URLs: []string{"stun:" + blackhole.LocalAddr().String()}}}, log.New(io.Discard, "", 0))
+	p, err := newPeer(t.Context(), settings, []webrtc.ICEServer{{URLs: []string{"stun:" + blackhole.LocalAddr().String()}}}, log.New(io.Discard, "", 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +338,7 @@ func TestNativePacketLossRecoveryAndFailure(t *testing.T) {
 				settings.SetNet(network)
 				settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 				settings.SetICETimeouts(200*time.Millisecond, 2*time.Second, 30*time.Millisecond)
-				p, err := newPeer(ctx, settings, nil, log.New(io.Discard, "", 0))
+				p, err := newPeer(ctx, settings, nil, log.New(io.Discard, "", 0), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -499,7 +497,7 @@ func TestIntentionalPeerShutdownIsQuiet(t *testing.T) {
 		settings.SetIncludeLoopbackCandidate(true)
 		settings.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
 		settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-		p, err := newPeer(ctx, settings, nil, log.New(&output, "", 0))
+		p, err := newPeer(ctx, settings, nil, log.New(&output, "", 0), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -528,7 +526,7 @@ func TestChannelErrorRemainsVisibleAfterClose(t *testing.T) {
 		for _, order := range []string{"error first", "close first", "after cleanup"} {
 			t.Run(fmt.Sprintf("%s/deadline=%t", order, errors.Is(callbackErr, context.DeadlineExceeded)), func(t *testing.T) {
 				var output bytes.Buffer
-				p, err := newPeer(t.Context(), webrtc.SettingEngine{}, nil, log.New(&output, "", 0))
+				p, err := newPeer(t.Context(), webrtc.SettingEngine{}, nil, log.New(&output, "", 0), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -672,7 +670,7 @@ func TestRunCallMarksGenuineFailuresThroughCancellation(t *testing.T) {
 			}
 			e := newStationEpoch(parent, 1)
 			e.revoke(cause)
-			err := runCall(e, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, newStationCapture(e), sessionSettings{})
+			err := runCall(e, filepath.Join(t.TempDir(), "session.json"), newStationCapture(e), sessionSettings{})
 			_, marked := errors.AsType[voiceCallError](err)
 			if marked != errors.Is(cause, failure) || !errors.Is(err, cause) {
 				t.Fatal("call failure marker lost a real failure or marked expected cancellation", err)
@@ -684,7 +682,8 @@ func TestRunCallMarksGenuineFailuresThroughCancellation(t *testing.T) {
 	}
 	e := newStationEpoch(t.Context(), 2)
 	defer e.revoke(context.Canceled)
-	if _, marked := errors.AsType[voiceCallError](runCall(e, credential{}, newStationCapture(e), sessionSettings{})); !marked {
-		t.Fatal("invalid call credential was not marked as a call failure")
+	err := runCall(e, filepath.Join(t.TempDir(), "session.json"), newStationCapture(e), sessionSettings{})
+	if _, marked := errors.AsType[voiceCallError](err); !marked || !strings.Contains(err.Error(), "make login") {
+		t.Fatal("missing saved session was not marked as a call failure with sign-in guidance", err)
 	}
 }

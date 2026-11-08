@@ -42,7 +42,7 @@ func TestWakeAdmissionPreservesFatalCaptureFailure(t *testing.T) {
 	attempts, cues := 0, 0
 	go func() {
 		defer close(returned)
-		done <- serveStation(ctx, client, credential{}, io.Discard, func(e *stationEpoch, gate *stationGate, _ credential) error {
+		done <- serveStation(ctx, client, io.Discard, func(e *stationEpoch, gate *stationGate) error {
 			attempts++
 			if attempts > 1 {
 				return errors.New("unexpected rearm after native capture failure")

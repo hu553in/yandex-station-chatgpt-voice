@@ -57,6 +57,75 @@ func TestControlBurstsReachTerminalEvent(t *testing.T) {
 	}
 }
 
+func TestFailureAfterHangupRevokesPlayback(t *testing.T) {
+	e := newStationEpoch(t.Context(), 1)
+	p, err := newPeer(e.ctx, webrtc.SettingEngine{}, nil, log.New(io.Discard, "", 0), e.revoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.close()
+	p.handleMessage([]byte(`{"type":"goodbye","reason":"normal"}`))
+	if context.Cause(p.ctx) != errProtocolHangup || !e.allowed() {
+		t.Fatal("normal hangup did not preserve permission for the accepted audio tail")
+	}
+	if _, err := p.offer(e.ctx); err != errProtocolHangup {
+		t.Fatal("terminal event allowed setup to continue", err)
+	}
+	p.handleMessage([]byte(`{"type":"session.error","message":"private-marker"}`))
+	result := p.outcome(context.Cause(p.ctx))
+	if result == nil || strings.Contains(result.Error(), "private-marker") || e.allowed() {
+		t.Fatal("failure after hangup was lost or leaked server text", result)
+	}
+}
+
+func TestFailureAfterHangupSuppressesTailAndCompletionCue(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	client, server := net.Pipe()
+	defer server.Close()
+	rearmed := make(chan struct{})
+	done := make(chan error, 1)
+	attempts, cues := 0, 0
+	tailLeaked := false
+	go func() {
+		done <- serveStation(ctx, client, io.Discard, func(e *stationEpoch, _ *stationGate) error {
+			attempts++
+			if attempts == 2 {
+				close(rearmed)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			p, err := newPeer(e.ctx, webrtc.SettingEngine{}, nil, log.New(io.Discard, "", 0), e.revoke)
+			if err != nil {
+				return err
+			}
+			defer p.close()
+			e.output.queueDecoded([]int16{1000, 1000})
+			p.handleMessage([]byte(`{"type":"goodbye","reason":"normal"}`))
+			p.handleMessage([]byte(`{"type":"session.error","message":"private-marker"}`))
+			pcm := make([]byte, 4)
+			e.output.callback(pcm, nil, 1)
+			tailLeaked = !allZero(pcm)
+			return voiceCallError{p.outcome(context.Cause(p.ctx))}
+		}, func(context.Context) error { cues++; return nil })
+	}()
+	if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-rearmed:
+	case <-ctx.Done():
+		t.Fatal("station did not rearm after terminal failure")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if tailLeaked || cues != 0 {
+		t.Fatalf("terminal failure leaked tail=%v cues=%d", tailLeaked, cues)
+	}
+}
+
 func TestControlRejectsMalformedAndBinaryMessages(t *testing.T) {
 	for _, binary := range []bool{false, true} {
 		t.Run(fmt.Sprintf("binary=%t", binary), func(t *testing.T) {
@@ -119,7 +188,7 @@ func TestControlTerminationCompletionCue(t *testing.T) {
 			done := make(chan error, 1)
 			attempts, cues := 0, 0
 			go func() {
-				done <- serveStation(ctx, client, credential{}, io.Discard, func(e *stationEpoch, _ *stationGate, _ credential) error {
+				done <- serveStation(ctx, client, io.Discard, func(e *stationEpoch, _ *stationGate) error {
 					attempts++
 					if attempts == 1 {
 						e.revoke(context.Cause(a.ctx))
@@ -175,7 +244,7 @@ func (w blockedControlLog) Write(data []byte) (int, error) {
 
 func TestControlFailurePublishedBeforeLog(t *testing.T) {
 	w := blockedControlLog{make(chan struct{}), make(chan struct{})}
-	p, err := newPeer(t.Context(), webrtc.SettingEngine{}, nil, log.New(w, "", 0))
+	p, err := newPeer(t.Context(), webrtc.SettingEngine{}, nil, log.New(w, "", 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

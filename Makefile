@@ -6,7 +6,7 @@ UV ?= uv
 PYTHON ?= python3
 ADB ?= adb
 STATION_IP ?=
-SESSION_JSON ?=
+CHROME ?=
 JOBS ?= 2
 
 -include config.mk
@@ -15,31 +15,35 @@ export GO UV PYTHON JOBS MAKE
 start restart: export VOICE := $(VOICE)
 start restart: export BACKEND_MODEL := $(BACKEND_MODEL)
 start restart: export BACKEND_THINKING_EFFORT := $(BACKEND_THINKING_EFFORT)
-auth: export SESSION_JSON := $(SESSION_JSON)
+login: export CHROME := $(CHROME)
 
-.PHONY: help setup fmt test vet check build clean connect status install start stop restart logs shell auth
+.PHONY: help setup fmt test vet check build clean connect status install start stop restart logs shell login rollback enable-autostart disable-autostart
 
 help:
 	@printf '%s\n' \
-	  'setup    Prepare Go modules, pinned Zig and ARM Opus (no system packages)' \
-	  'fmt      Format Go source in place' \
-	  'test     Run native race tests (requires host Opus, pkg-config and cc)' \
-	  'vet      Vet native source (requires host Opus, pkg-config and cc)' \
-	  'check    Check formatting, helpers, tests and vet without formatting writes' \
-	  'build    Build ARM build/yandex-station-chatgpt-voice' \
-	  'clean    Remove build output; retain config, credentials and toolchain cache' \
-	  'connect  Connect ADB to STATION_IP:5555' \
-	  'status   Inspect root, install, process, session permissions and token expiry' \
-	  'install  Build, verify, stop the old client and install; leave stopped' \
-	  'start    Start the installed client' \
-	  'stop     Stop only the verified client process' \
-	  'restart  Stop and start the installed client' \
-	  'logs     Follow /tmp/yandex-station-chatgpt-voice.log' \
-	  'shell    Open the selected Station shell' \
-	  'auth     Import with a hidden prompt, or SESSION_JSON=/path/to/file' \
+	  'setup             Prepare Go modules, pinned Zig and ARM Opus (no system packages)' \
+	  'fmt               Format Go source in place' \
+	  'test              Run native race tests (requires host Opus, pkg-config and cc)' \
+	  'vet               Vet native source (requires host Opus, pkg-config and cc)' \
+	  'check             Check formatting, helpers, tests and vet without formatting writes' \
+	  'build             Build ARM build/yandex-station-chatgpt-voice' \
+	  'clean             Remove build output; retain config, credentials and toolchain cache' \
+	  'connect           Connect ADB to STATION_IP:5555' \
+	  'status            Inspect root, install, process, session permissions and token expiry' \
+	  'install           Build, verify, stop the old client and install; leave stopped' \
+	  'login             Sign in to ChatGPT in a private Chrome window; the Station saves a renewable session' \
+	  'start             Start the installed client with bounded process recovery' \
+	  'stop              Stop the verified client and pause autostart until make start' \
+	  'restart           Stop and start the installed client' \
+	  'rollback          Restore client.previous without changing credentials; leave stopped' \
+	  'enable-autostart  Enable boot startup with the last make start settings' \
+	  'disable-autostart Remove our boot hook without stopping the running client' \
+	  'logs              Follow /tmp/yandex-station-chatgpt-voice.log' \
+	  'shell             Open the selected Station shell' \
 	  '' \
 	  'Copy config.example.mk to config.mk and set STATION_IP before device commands.' \
-	  'Use make install restart to install and explicitly activate.'
+	  'First run: make install, make login, then make start.' \
+	  'Use make install restart to install and explicitly activate an update.'
 
 setup:
 	$(GO) list -mod=readonly -tags=nolibopusfile -deps ./cmd/yandex-station-chatgpt-voice >/dev/null
@@ -74,7 +78,7 @@ build:
 clean:
 	rm -rf build
 
-connect status start stop restart logs shell auth:
+connect status start stop restart logs shell login rollback enable-autostart disable-autostart:
 	$(PYTHON) tools/station.py --adb "$(ADB)" --ip "$(STATION_IP)" $@
 
 install: build

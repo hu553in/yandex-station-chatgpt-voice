@@ -18,7 +18,7 @@ func TestStationLogUsesUTC(t *testing.T) {
 	cancel()
 	before := time.Now().UTC().Truncate(time.Second)
 	var output bytes.Buffer
-	if err := serveStation(ctx, client, credential{}, &output, nil, nil); !errors.Is(err, context.Canceled) {
+	if err := serveStation(ctx, client, &output, nil, nil); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	stamp, found := strings.CutSuffix(output.String(), " Station voice stopped.\n")

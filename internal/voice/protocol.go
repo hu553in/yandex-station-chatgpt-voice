@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,7 +136,32 @@ func decodeEvent(data []byte) (event, error) {
 		if json.Unmarshal(payload, &p) == nil && (strings.EqualFold(p.Update, "hangup") || strings.EqualFold(p.Update, "hang_up")) {
 			return event{ended: true}, nil
 		}
-	case "error":
+	case "goodbye":
+		var p struct {
+			Reason string `json:"reason"`
+			Detail string `json:"detail"`
+		}
+		if json.Unmarshal(payload, &p) != nil {
+			return event{}, errors.New("invalid goodbye event")
+		}
+		switch p.Reason {
+		case "error", "cap_reached", "normal", "client_request", "timeout", "session_expired":
+		default:
+			p.Reason = "unknown"
+		}
+		switch p.Detail {
+		case "internal_error", "upstream_error", "server_error", "unauthorized", "quota_exceeded", "rate_limit_exceeded", "invalid_session", "invalid_model", "unsupported_country":
+		default:
+			p.Detail = "unknown"
+		}
+		if p.Reason == "cap_reached" {
+			return event{err: errors.New("ChatGPT ended this call because of its usage limit")}, nil
+		}
+		if (p.Reason == "normal" || p.Reason == "client_request") && p.Detail == "unknown" {
+			return event{ended: true}, nil
+		}
+		return event{err: fmt.Errorf("ChatGPT ended this voice session (reason=%s, detail=%s)", p.Reason, p.Detail)}, nil
+	case "error", "session.error":
 		return event{err: errors.New("ChatGPT reported a voice session error")}, nil
 	}
 	return event{}, nil

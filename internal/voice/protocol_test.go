@@ -131,6 +131,49 @@ func TestPositiveRemainingQuotaIsNotTerminal(t *testing.T) {
 	}
 }
 
+func TestGoodbyeEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, diagnostic string
+		normal                bool
+	}{
+		{"normal", `{"type":"goodbye","reason":"normal"}`, "", true},
+		{"requested", `{"type":"goodbye","reason":"client_request"}`, "", true},
+		{"quota", `{"type":"goodbye","reason":"cap_reached"}`, "usage limit", false},
+		{"failure", `{"type":"goodbye","reason":"error","detail":"internal_error"}`, "reason=error, detail=internal_error", false},
+		{"expired", `{"type":"goodbye","reason":"session_expired"}`, "reason=session_expired", false},
+		{"timeout", `{"type":"goodbye","reason":"timeout"}`, "reason=timeout", false},
+		{"failure overrides normal", `{"type":"goodbye","reason":"normal","detail":"invalid_model"}`, "detail=invalid_model", false},
+		{"unknown codes", `{"type":"goodbye","reason":"private-marker","detail":"private-marker"}`, "reason=unknown, detail=unknown", false},
+		{"missing reason", `{"type":"goodbye"}`, "reason=unknown", false},
+		{"session error", `{"type":"session.error","message":"private-marker"}`, "voice session error", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, input := range [][]byte{
+				[]byte(tc.raw),
+				testEnvelope(t, tc.raw),
+				testEnvelope(t, `{"payload":`+tc.raw+`}`),
+			} {
+				ev, err := decodeEvent(input)
+				if err != nil || ev.ended != tc.normal || (ev.err == nil) != tc.normal {
+					t.Fatalf("terminal classification: %+v, %v", ev, err)
+				}
+				if ev.err != nil && (!strings.Contains(ev.err.Error(), tc.diagnostic) || strings.Contains(ev.err.Error(), "private-marker")) {
+					t.Fatalf("unsafe or missing terminal diagnostic: %v", ev.err)
+				}
+			}
+		})
+	}
+	for _, raw := range []string{
+		`{"type":"goodbye","reason":42}`,
+		`{"type":"goodbye","payload":{"reason":true}}`,
+		`{"type":"goodbye","reason":"normal","detail":{}}`,
+	} {
+		if _, err := decodeEvent(testEnvelope(t, raw)); err == nil {
+			t.Errorf("malformed goodbye accepted: %s", raw)
+		}
+	}
+}
+
 func TestRunSettingsPayload(t *testing.T) {
 	for _, tc := range []struct {
 		name                 string

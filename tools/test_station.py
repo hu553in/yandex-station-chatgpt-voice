@@ -1,15 +1,10 @@
 import contextlib
-import errno
-import hashlib
 import io
 import json
 import os
 from pathlib import Path
-import pty
-import select
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -23,6 +18,7 @@ import station
 
 SOURCE = Path(__file__).resolve().parent.parent
 SETTING_NAMES = ("VOICE", "BACKEND_MODEL", "BACKEND_THINKING_EFFORT")
+SIGN_IN = (SOURCE / "internal/voice/testdata/browser-sign-in.json").read_bytes()
 
 
 def fake_station_main():
@@ -30,6 +26,7 @@ def fake_station_main():
     (root / "exports.json").write_text(
         json.dumps({name: os.environ.get(name) for name in SETTING_NAMES})
     )
+    (root / "chrome-export.json").write_text(json.dumps(os.environ.get("CHROME")))
     overrides = r"""
 process() {
     mkdir -p "$runtime"
@@ -50,21 +47,42 @@ verify_process() {
         if script.startswith("sh /tmp/voice-script-"):
             script = Path(shlex.split(script)[1]).read_text()
         script = script.replace(station.COMMON, station.COMMON + overrides)
+        if "cleanup_boot" in script:
+            script = script.replace(
+                station.COMMON + overrides,
+                station.COMMON + overrides
+                + f"\nawk() {{ echo ro; }}\nmount() {{ echo \"$*\" >> {shlex.quote(str(root / 'mounts'))}; }}\nsync() {{ :; }}\n",
+            )
+        if (root / "init-supported").exists():
+            script = script.replace(station.boot_check(), "boot_scripts_ok() { return 0; }\n")
+        script = script.replace(
+            "/etc/init.d/.station-voice.", str(root / "hook-tmp.")
+        )
         for original, replacement in (
             ("app=/data/yandex-station-chatgpt-voice", root / "app"),
             ("runtime=/tmp/yandex-station-chatgpt-voice", root / "runtime"),
             ("lock=/data/.yandex-station-chatgpt-voice.lock", root / "lock"),
             ("log=/tmp/yandex-station-chatgpt-voice.log", root / "client.log"),
+            ("hook=/etc/init.d/S99zchatgptvoice", root / "hook"),
+            ("system_lock=/data/local/tmp/station-root.lock", root / "system-lock"),
         ):
             name = original.split("=", 1)[0]
             script = script.replace(
                 original, name + "=" + shlex.quote(str(replacement))
             )
-        return script.replace('[ "$(id -u)" = 0 ]', "[ 0 = 0 ]")
+        return script.replace(station.APP + "/", str(root / "app") + "/").replace(
+            '[ "$(id -u)" = 0 ]', "[ 0 = 0 ]"
+        )
 
     def fake_adb(args, *command, quiet=False):
         if command[0] in ("push", "pull"):
-            shutil.copyfile(command[1], command[2])
+            paths = [
+                str(root / "app") + path[len(station.APP):]
+                if path.startswith(station.APP + "/")
+                else path
+                for path in command[1:]
+            ]
+            shutil.copyfile(*paths)
             return b""
         if command[0] != "shell" or len(command) != 2:
             raise AssertionError("Unexpected fake ADB command")
@@ -96,16 +114,52 @@ verify_process() {
         sys.stderr.write(result.stderr.decode(errors="replace"))
         return result.stdout
 
+    real_install = station.install
+    install = real_install if (root / "real-install").exists() else lambda *args: None
+    candidate = root / "candidate" if (root / "real-install").exists() else station.BINARY
     with (
         mock.patch.object(station, "adb_run", fake_adb),
-        mock.patch.object(station, "arm_binary", return_value=b"synthetic-arm"),
-        mock.patch.object(
-            station, "session_input", return_value={"accessToken": "synthetic-token"}
-        ),
-        mock.patch.object(station, "auth"),
-        mock.patch.object(station, "install"),
+        mock.patch.object(station, "arm_binary", side_effect=lambda p: p.read_bytes() if (root / "real-install").exists() else b"synthetic-arm"),
+        mock.patch.object(station, "BINARY", candidate),
+        mock.patch.object(station, "install", side_effect=install),
     ):
         station.main()
+
+
+class BootScriptTest(unittest.TestCase):
+    def test_saved_startup_respects_pause_and_mutation_lock(self):
+        subprocess.run(["sh", "-n"], input=station.BOOT_STUB, check=True)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            app = root / "app"
+            app.mkdir()
+            lock = root / "lock"
+            launched = root / "launched"
+            script = station.start_script(["--voice=custom voice"]).decode().replace(
+                station.COMMON,
+                "set -eu\n"
+                + f"app={shlex.quote(str(app))}\nlock={shlex.quote(str(lock))}\n"
+                + f"start_client() {{ printf '%s\\n' \"$@\" > {shlex.quote(str(launched))}; }}\n",
+            )
+            (app / "stopped").touch()
+            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)
+            self.assertFalse(launched.exists())
+            (app / "stopped").unlink()
+            lock.mkdir()
+            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)
+            self.assertFalse(launched.exists())
+            lock.rmdir()
+            subprocess.run(["sh"], input=script, text=True, capture_output=True, check=True)
+            self.assertEqual(launched.read_text(), "--voice=custom voice\n")
+            self.assertFalse(lock.exists())
+            launched.unlink()
+            racing_script = script.replace(
+                'mkdir "$lock"',
+                'mkdir() { : > "$app/stopped"; command mkdir "$@"; }\nmkdir "$lock"',
+            )
+            subprocess.run(["sh"], input=racing_script, text=True, capture_output=True, check=True)
+            self.assertFalse(launched.exists(), "boot ignored a stop completed before lock admission")
+            self.assertFalse(lock.exists())
 
 
 class RuntimeDirectoryTest(unittest.TestCase):
@@ -146,7 +200,7 @@ class RuntimeDirectoryTest(unittest.TestCase):
                     self.assertEqual(result.returncode, expected, result.stderr)
 
 
-class LaunchSettingsTest(unittest.TestCase):
+class FakeStationTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="station-launch-test-")
         self.addCleanup(self.temporary.cleanup)
@@ -166,6 +220,18 @@ class LaunchSettingsTest(unittest.TestCase):
             "import json, os, signal, sys, time\n"
             "from pathlib import Path\n"
             "root = Path(os.environ['STATION_TEST_ROOT'])\n"
+            "if sys.argv[1:] == ['help']:\n"
+            "    print('Import a token.' if (root / 'old-client').exists() else 'Sign in with make login.')\n"
+            "    sys.exit(0)\n"
+            "if sys.argv[1:3] == ['auth', 'import'] and sys.argv[3] == '--session-json':\n"
+            "    if (root / 'import-fails').exists():\n"
+            "        print('2026/11/08 00:00:00 Error: ChatGPT rejected the saved web session (HTTP 403); run make login on the computer', file=sys.stderr)\n"
+            "        sys.exit(1)\n"
+            "    (root / 'imported.json').write_bytes(Path(sys.argv[4]).read_bytes())\n"
+            "    print('Signed in. The Station saved a renewable ChatGPT session.')\n"
+            "    sys.exit(0)\n"
+            "if sys.argv[1:] == ['supervise', '--help']:\n"
+            "    sys.exit(0 if (root / 'supports-supervise').exists() else 1)\n"
             "if sys.argv[1:] == ['auth', 'status']:\n"
             "    print('Saved token expiry (unverified): 2100-01-01T00:00:00Z')\n"
             "    sys.exit(0)\n"
@@ -189,6 +255,22 @@ class LaunchSettingsTest(unittest.TestCase):
             "os.execvp(sys.argv[1], sys.argv[1:])\n"
         )
         launcher.chmod(0o700)
+        uv = self.root / "uv"
+        uv.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, stat, sys\n"
+            "from pathlib import Path\n"
+            "root = Path(os.environ['STATION_TEST_ROOT'])\n"
+            "output = Path(sys.argv[-1])\n"
+            "(root / 'uv-call.json').write_text(json.dumps({'argv': sys.argv[1:], 'directory_mode': stat.S_IMODE(output.parent.stat().st_mode)}))\n"
+            "if (root / 'uv-cancel').exists(): sys.exit(130)\n"
+            "if (root / 'uv-fail').exists(): sys.exit(1)\n"
+            "fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
+            "os.write(fd, (root / 'sign-in.json').read_bytes())\n"
+            "os.close(fd)\n"
+        )
+        uv.chmod(0o700)
+        (self.root / "sign-in.json").write_bytes(SIGN_IN)
         self.environment = os.environ.copy()
         for name in (*SETTING_NAMES, "MAKEFLAGS", "MFLAGS", "MAKELEVEL"):
             self.environment.pop(name, None)
@@ -219,7 +301,12 @@ class LaunchSettingsTest(unittest.TestCase):
                 text += f"define {name}\n{value.replace('$', '$$')}\nendef\n"
         (self.root / "config.mk").write_text(text)
 
-    def run_make(self, action):
+    def leftovers(self):
+        return sorted(path.name for path in (self.root / "app").glob(".auth-*")) + (
+            ["lock"] if (self.root / "lock").exists() else []
+        )
+
+    def run_make(self, action, succeeds=True):
         result = subprocess.run(
             [
                 "make",
@@ -236,6 +323,9 @@ class LaunchSettingsTest(unittest.TestCase):
             text=True,
             timeout=15,
         )
+        if not succeeds:
+            self.assertNotEqual(result.returncode, 0)
+            return result
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return json.loads((self.root / "exports.json").read_text())
 
@@ -247,6 +337,8 @@ class LaunchSettingsTest(unittest.TestCase):
             else []
         )
 
+
+class LaunchSettingsTest(FakeStationTest):
     def test_status_reports_expiry_and_tolerates_old_or_missing_client(self):
         self.configure()
         client = self.root / "app/client"
@@ -339,6 +431,7 @@ class LaunchSettingsTest(unittest.TestCase):
                     "--backend-thinking-effort=" + actual[2],
                 ],
             )
+
         self.configure(
             source="VOICE = $()  cash$$hash\\#  \nBACKEND_MODEL = -model\nBACKEND_THINKING_EFFORT = disabled\n"
         )
@@ -353,9 +446,92 @@ class LaunchSettingsTest(unittest.TestCase):
             ],
         )
 
+    def test_supervisor_launch_and_stop_marker(self):
+        self.configure(("custom voice", "model", "disabled"))
+        (self.root / "supports-supervise").touch()
+        self.run_make("start")
+        self.assertEqual(
+            self.launches()[-1],
+            [
+                "supervise",
+                "--log=" + str(self.root / "client.log"),
+                "--voice=custom voice",
+                "--backend-model=model",
+                "--backend-thinking-effort=disabled",
+            ],
+        )
+        startup = self.root / "app/start.sh"
+        self.assertEqual(startup.stat().st_mode & 0o777, 0o700)
+        subprocess.run(["sh", "-n", str(startup)], check=True)
+        self.run_make("stop")
+        self.assertTrue((self.root / "app/stopped").is_file())
+        self.run_make("start")
+        self.assertFalse((self.root / "app/stopped").exists())
+
+    def test_rollback_retains_previous_and_repeated_rollback_is_stopped(self):
+        self.configure()
+        client = self.root / "app/client"
+        previous = self.root / "app/client.previous"
+        previous.write_bytes(client.read_bytes() + b"\n# previous build\n")
+        previous.chmod(0o700)
+        expected = previous.read_bytes()
+        self.run_make("start")
+        for _ in range(2):
+            self.run_make("rollback")
+            self.assertEqual(client.read_bytes(), expected)
+            self.assertEqual(previous.read_bytes(), expected)
+            self.assertTrue((self.root / "app/stopped").exists())
+            self.assertFalse((self.root / "app/alive").exists())
+
+    def test_identical_install_keeps_the_previous_build(self):
+        self.configure()
+        (self.root / "real-install").touch()
+        client = self.root / "app/client"
+        original = client.read_bytes()
+        candidate = self.root / "candidate"
+        candidate.write_bytes(original + b"\n# new build\n")
+        for _ in range(2):
+            self.run_make("install")
+            self.assertEqual(client.read_bytes(), candidate.read_bytes())
+            self.assertEqual((self.root / "app/client.previous").read_bytes(), original)
+            self.assertTrue((self.root / "app/stopped").exists())
+
+    def test_autostart_owns_only_its_hook_and_restores_mount_mode(self):
+        self.configure()
+        (self.root / "supports-supervise").touch()
+        (self.root / "init-supported").touch()
+        self.run_make("start")
+        for _ in range(2):
+            self.run_make("enable-autostart")
+            self.assertEqual((self.root / "hook").read_bytes(), station.BOOT_STUB)
+        self.assertEqual((self.root / "mounts").read_text().splitlines(), ["-o remount,rw /", "-o remount,ro /"])
+        self.run_make("disable-autostart")
+        self.assertFalse((self.root / "hook").exists())
+        self.assertTrue((self.root / "app/alive").exists())
+        self.assertFalse((self.root / "system-lock").exists())
+
+    def test_autostart_refuses_unknown_boot_missing_settings_and_foreign_hook(self):
+        self.configure()
+        (self.root / "supports-supervise").touch()
+        (self.root / "init-supported").touch()
+        result = self.run_make("enable-autostart", succeeds=False)
+        self.assertIn("Run make start once first", result.stdout + result.stderr)
+        self.assertFalse((self.root / "hook").exists())
+        self.assertFalse((self.root / "mounts").exists())
+        self.run_make("start")
+        (self.root / "init-supported").unlink()
+        result = self.run_make("enable-autostart", succeeds=False)
+        self.assertIn("Boot scripts not recognized", result.stdout + result.stderr)
+        (self.root / "init-supported").touch()
+        (self.root / "hook").write_text("foreign hook")
+        result = self.run_make("enable-autostart", succeeds=False)
+        self.assertIn("Boot hook is not ours", result.stdout + result.stderr)
+        self.assertEqual((self.root / "hook").read_text(), "foreign hook")
+        self.assertFalse((self.root / "mounts").exists())
+
     def test_other_actions_do_not_export_or_launch_settings(self):
         self.configure(("private-setting", "model", "effort"))
-        for action in ("stop", "auth", "install"):
+        for action in ("stop", "login", "install"):
             self.assertEqual(self.run_make(action), dict.fromkeys(SETTING_NAMES))
             self.assertEqual(self.launches(), [])
 
@@ -376,319 +552,131 @@ class LaunchSettingsTest(unittest.TestCase):
                 acquire.assert_not_called()
 
 
-class AuthInputTest(unittest.TestCase):
-    def test_auth_environment_and_explicit_path_precedence(self):
-        for cli, expected in (
-            ([], "environment-path"),
-            (["--session-json", "cli-path"], "cli-path"),
-            (["--session-json="], ""),
-        ):
-            with (
-                self.subTest(cli=cli),
-                mock.patch.dict(os.environ, SESSION_JSON="environment-path"),
-                mock.patch.object(
-                    sys, "argv", ["station.py", "--ip", "192.0.2.1", *cli, "auth"]
-                ),
-                mock.patch.object(
-                    station, "session_input", side_effect=ValueError("selected")
-                ) as selected,
-                mock.patch.object(station, "acquire") as acquire,
-            ):
-                with self.assertRaisesRegex(ValueError, "selected"):
-                    station.main()
-                selected.assert_called_once_with(expected)
-                acquire.assert_not_called()
-
-    def hidden_input(self, payload, interrupt=False):
-        master, slave = pty.openpty()
-        program = (
-            "import hashlib, sys, termios\n"
-            "import station\n"
-            "before = termios.tcgetattr(0)\n"
-            "try:\n"
-            " token = station.session_input('')['accessToken'].encode()\n"
-            " print('RESULT', len(token), hashlib.sha256(token).hexdigest(), flush=True)\n"
-            "except (ValueError, EOFError, KeyboardInterrupt) as error:\n"
-            " print('RESULT', type(error).__name__, str(error), flush=True)\n"
-            "print('RESTORED', termios.tcgetattr(0) == before, flush=True)\n"
-            "sys.stdin.readline()\n"
+class LoginTest(FakeStationTest):
+    def test_login_passes_chrome_literally_and_imports_on_the_station(self):
+        marker = self.root / "MUST_NOT_RUN"
+        chrome = f"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome; touch {marker} `touch {marker}` $(touch {marker}) $HOME"
+        self.configure(source=f"define CHROME\n{chrome.replace('$', '$$')}\nendef\n")
+        result = subprocess.run(
+            ["make", "--no-print-directory", f"PYTHON={sys.executable}", "ADB=fake-local-only", "login"],
+            cwd=self.root,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
-        output = bytearray()
-        process = None
-        try:
-            process = subprocess.Popen(
-                [sys.executable, "-c", program],
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                start_new_session=True,
-                env=dict(os.environ, PYTHONPATH=str(SOURCE / "tools")),
-            )
-            os.set_blocking(master, False)
-            offset = 0
-            signaled = False
-            acknowledged = False
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                pending = (
-                    [master]
-                    if b"(hidden): " in output and offset < len(payload)
-                    else []
-                )
-                ready, writable, _ = select.select([master], pending, [], 0.01)
-                if ready:
-                    try:
-                        data = os.read(master, 65536)
-                        if not data:
-                            process.wait(timeout=5)
-                            break
-                        output.extend(data)
-                    except OSError as error:
-                        if error.errno != errno.EIO:
-                            raise
-                        process.wait(timeout=5)
-                        break
-                if process.poll() is not None and not ready:
-                    break
-                if b"(hidden): " not in output:
-                    continue
-                if writable and offset < len(payload):
-                    try:
-                        offset += os.write(master, payload[offset : offset + 256])
-                    except BlockingIOError:
-                        pass
-                if interrupt and offset == len(payload) and not signaled:
-                    process.send_signal(signal.SIGINT)
-                    signaled = True
-                if b"RESTORED " in output and offset == len(payload) and not acknowledged:
-                    os.write(master, b"\n")
-                    acknowledged = True
-            self.assertIsNotNone(
-                process.poll(), "Hidden input did not finish: " + output.decode(errors="replace")
-            )
-            self.assertEqual(process.returncode, 0, output.decode(errors="replace"))
-            self.assertIn(b"RESTORED True", output)
-            self.assertNotIn(b"PRIVATE-TOKEN", output)
-            self.assertNotIn(b"A" * 32, output)
-            return output.decode()
-        finally:
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        call = json.loads((self.root / "uv-call.json").read_text())
+        output = Path(call["argv"][-1])
+        self.assertEqual(
+            call["argv"],
+            ["run", "--script", str(SOURCE / "tools/browser_login.py"), "--chrome=" + chrome, str(output)],
+        )
+        self.assertEqual(call["directory_mode"], 0o700)
+        self.assertFalse(output.parent.exists(), "local sign-in file survived")
+        self.assertEqual((self.root / "imported.json").read_bytes(), SIGN_IN)
+        self.assertIn("Signed in. The Station saved a renewable ChatGPT session.", result.stdout)
+        self.assertEqual(json.loads((self.root / "chrome-export.json").read_text()), chrome)
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse(marker.exists(), "CHROME executed as shell code")
+        self.run_make("stop")
+        self.assertIsNone(json.loads((self.root / "chrome-export.json").read_text()))
 
-    def test_hidden_paste_accepts_long_tokens_and_restores_terminal(self):
-        for size in (5000, 32768):
-            with self.subTest(size=size):
-                token = b"PRIVATE-TOKEN" + b"A" * (size - len(b"PRIVATE-TOKEN"))
-                payload = (
-                    token + b"Z\x7f\r\n" if size < 32768 else token + b"\n"
-                )
-                output = self.hidden_input(payload)
-                self.assertIn(
-                    f"RESULT {size} {hashlib.sha256(token).hexdigest()}", output
-                )
+    def test_login_refuses_old_or_missing_client_before_opening_a_browser(self):
+        self.configure()
+        (self.root / "old-client").touch()
+        result = self.run_make("login", succeeds=False)
+        self.assertIn("cannot use browser sign-in. Run make install first.", result.stderr)
+        (self.root / "app/client").unlink()
+        result = self.run_make("login", succeeds=False)
+        self.assertIn("Install the client first: make install.", result.stderr)
+        self.assertFalse((self.root / "uv-call.json").exists(), "browser opened before preflight")
+        self.assertEqual(self.leftovers(), [])
 
-    def test_hidden_paste_rejection_and_cancel_restore_terminal(self):
-        for payload, interrupt, expected in (
-            (
-                b"PRIVATE-TOKEN" + b"A" * (32769 - len(b"PRIVATE-TOKEN")) + b"\n",
-                False,
-                "ValueError Access token exceeds 32768 bytes.",
-            ),
-            (
-                b"PRIVATE-TOKEN" + b"A" * (32769 - len(b"PRIVATE-TOKEN")) + b"\x7f\n",
-                False,
-                "ValueError Access token exceeds 32768 bytes.",
-            ),
-            (
-                b"PRIVATE-TOKEN" + b"A" * 40000 + b"\n",
-                False,
-                "ValueError Access token exceeds 32768 bytes.",
-            ),
-            (
-                b"PRIVATE-TOKEN\xff\n",
-                False,
-                "ValueError Paste the ChatGPT web access token as ASCII text.",
-            ),
-            (b"PRIVATE-TOKEN\x04", False, "EOFError"),
-            (b"PRIVATE-TOKEN", True, "KeyboardInterrupt"),
+    def test_canceled_or_failed_sign_in_leaves_the_station_untouched(self):
+        self.configure()
+        for flag, code, message in (
+            ("uv-cancel", 130, "Sign-in canceled; the Station was not changed."),
+            ("uv-fail", 1, "Browser sign-in did not finish; the Station was not changed."),
         ):
-            with self.subTest(expected=expected):
-                self.assertIn("RESULT " + expected, self.hidden_input(payload, interrupt))
-
-    def test_other_actions_ignore_environment_and_reject_explicit_path(self):
-        for action in (
-            "connect",
-            "status",
-            "install",
-            "start",
-            "stop",
-            "restart",
-            "logs",
-            "shell",
-        ):
-            with (
-                self.subTest(action=action),
-                mock.patch.dict(os.environ, SESSION_JSON="incidental-path"),
-                mock.patch.object(
-                    sys, "argv", ["station.py", "--ip", "192.0.2.1", action]
-                ),
-                mock.patch.object(station, "session_input") as selected,
-                mock.patch.object(
-                    station, "adb_run", return_value=b"connected to 192.0.2.1:5555"
-                ),
-                mock.patch.object(station, "status"),
-                mock.patch.object(station, "adb_shell"),
-                mock.patch.object(station.subprocess, "call", return_value=0),
-                mock.patch.object(station, "arm_binary"),
-                mock.patch.object(
-                    station, "acquire", side_effect=ValueError("stop before mutation")
-                ),
-            ):
-                try:
-                    station.main()
-                except ValueError as error:
-                    self.assertEqual(str(error), "stop before mutation")
-                except SystemExit as error:
-                    self.assertEqual(error.code, 0)
-                selected.assert_not_called()
-                for explicit in ("", "explicit-path"):
-                    with (
-                        mock.patch.object(
-                            sys,
-                            "argv",
-                            [
-                                "station.py",
-                                "--ip",
-                                "192.0.2.1",
-                                "--session-json=" + explicit,
-                                action,
-                            ],
-                        ),
-                        contextlib.redirect_stderr(io.StringIO()),
-                    ):
-                        with self.assertRaises(SystemExit) as rejected:
-                            station.main()
-                        self.assertEqual(rejected.exception.code, 2)
-
-    def test_selected_file_errors_are_fixed_and_hide_paths(self):
-        marker = "synthetic-private-path-marker"
-        with tempfile.TemporaryDirectory() as directory:
-            missing = str(Path(directory) / marker)
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(SOURCE / "tools/station.py"),
-                    "--ip",
-                    "192.0.2.1",
-                    "--session-json=" + missing,
-                    "auth",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            self.assertEqual(result.returncode, 1)
-            self.assertEqual(
-                result.stderr, "Error: Cannot read selected session JSON file.\n"
-            )
-            with (
-                mock.patch.object(station.os, "open", return_value=123),
-                mock.patch.object(station.os, "fdopen") as opened,
-            ):
-                opened.return_value.__enter__.return_value.read.side_effect = OSError(
-                    marker
-                )
-                with mock.patch.object(
-                    station.os,
-                    "fstat",
-                    return_value=SimpleNamespace(st_mode=0o100600, st_size=10),
-                ):
-                    with self.assertRaises(ValueError) as rejected:
-                        station.session_input(marker)
-                self.assertEqual(
-                    str(rejected.exception), "Cannot read selected session JSON file."
-                )
-                self.assertTrue(rejected.exception.__suppress_context__)
-                self.assertIsNone(rejected.exception.__cause__)
-
-    def test_make_auth_transports_literal_path_and_exports_only_for_auth(self):
-        with tempfile.TemporaryDirectory(prefix="station-auth-test-") as directory:
-            root = Path(directory)
-            shutil.copyfile(SOURCE / "Makefile", root / "Makefile")
-            (root / "tools").mkdir()
-            (root / "tools/station.py").write_text(
-                "import json, os, sys\nfrom pathlib import Path\nfrom unittest import mock\n"
-                f"sys.path.insert(0, {str(SOURCE / 'tools')!r})\nimport station\n"
-                f"root = Path({directory!r})\n"
-                "(root / 'export.json').write_text(json.dumps(os.environ.get('SESSION_JSON')))\n"
-                "read_input = station.session_input\n"
-                "def selected(path):\n"
-                "    (root / 'selected.json').write_text(json.dumps(path))\n"
-                "    return read_input(path)\n"
-                "def imported(args, nonce, stage, local):\n"
-                "    (root / 'imported.json').write_bytes(local.read_bytes())\n"
-                "with mock.patch.object(station, 'session_input', selected), mock.patch.object(station, 'auth', imported), mock.patch.object(station, 'acquire'), mock.patch.object(station, 'release'), mock.patch.object(station, 'adb_shell', return_value=b''):\n"
-                "    station.main()\n"
-            )
-            environment = os.environ.copy()
-            for name in ("SESSION_JSON", "MAKEFLAGS", "MFLAGS", "MAKELEVEL"):
-                environment.pop(name, None)
-            environment["PYTHONDONTWRITEBYTECODE"] = "1"
-            for name in (
-                'session"; touch SHELL_MARKER; #',
-                "  сессия\t'\"`touch BACKTICK_MARKER` $(touch DOLLAR_MARKER) $HOME\nend  ",
-            ):
-                path = root / name
-                path.write_text(
-                    '{"accessToken":"synthetic-token","deviceId":"synthetic-device"}'
-                )
-                (root / "config.mk").write_text(
-                    "STATION_IP = 192.0.2.1\ndefine SESSION_JSON\n"
-                    + str(path).replace("$", "$$")
-                    + "\nendef\n"
-                )
+            with self.subTest(flag=flag):
+                (self.root / flag).touch()
                 result = subprocess.run(
-                    [
-                        "make",
-                        "--no-print-directory",
-                        "auth",
-                        f"PYTHON={sys.executable}",
-                    ],
-                    cwd=root,
-                    env=environment,
+                    [sys.executable, str(SOURCE / "tools/test_station.py"), "--fake-station", "--ip", "192.0.2.1", "login"],
+                    cwd=self.root,
+                    env=self.environment,
                     capture_output=True,
                     text=True,
-                    timeout=5,
+                    timeout=15,
                 )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(
-                    json.loads((root / "selected.json").read_text()), str(path)
-                )
-                self.assertEqual(
-                    json.loads((root / "export.json").read_text()), str(path)
-                )
-                self.assertEqual(
-                    json.loads((root / "imported.json").read_text()),
-                    {"accessToken": "synthetic-token", "deviceId": "synthetic-device"},
-                )
-                for marker in ("SHELL_MARKER", "BACKTICK_MARKER", "DOLLAR_MARKER"):
-                    self.assertFalse(
-                        (root / marker).exists(),
-                        "session path executed as shell syntax",
-                    )
-            result = subprocess.run(
-                ["make", "--no-print-directory", "stop", f"PYTHON={sys.executable}"],
-                cwd=root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIsNone(json.loads((root / "export.json").read_text()))
+                (self.root / flag).unlink()
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("inspect remote state", result.stderr)
+                self.assertFalse((self.root / "imported.json").exists())
+                self.assertEqual(self.leftovers(), [])
+
+    def test_station_import_failure_is_shown_and_cleaned_up(self):
+        self.configure()
+        (self.root / "import-fails").touch()
+        result = self.run_make("login", succeeds=False)
+        self.assertIn("Station command failed (1).", result.stderr)
+        self.assertIn(
+            "Error: ChatGPT rejected the saved web session (HTTP 403); run make login on the computer",
+            result.stderr,
+        )
+        self.assertNotIn("synthetic-golden", result.stdout + result.stderr)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_sign_in_is_captured_before_the_mutation_lock(self):
+        events = []
+        with (
+            mock.patch.object(sys, "argv", ["station.py", "--ip", "192.0.2.1", "login"]),
+            mock.patch.object(station, "login_preflight", side_effect=lambda args: events.append("preflight")),
+            mock.patch.object(
+                station, "browser_sign_in", side_effect=lambda local: events.append("capture") or SIGN_IN
+            ),
+            mock.patch.object(station, "acquire", side_effect=lambda args, nonce: events.append("lock")),
+            mock.patch.object(station, "import_sign_in", side_effect=lambda *args: events.append("import")),
+            mock.patch.object(station, "release", side_effect=lambda *args: events.append("release")),
+        ):
+            station.main()
+        self.assertEqual(events, ["preflight", "capture", "lock", "import", "release"])
+
+    def test_upload_is_quiet_and_verified_before_import(self):
+        args = SimpleNamespace(adb="fake-adb", serial="synthetic", uncertain=False)
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory) / "sign-in.json"
+            local.write_bytes(SIGN_IN)
+            with (
+                mock.patch.object(station, "adb_run") as run,
+                mock.patch.object(station, "adb_read", return_value=b"altered") as read,
+                mock.patch.object(station, "adb_shell") as shell,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Uploaded sign-in differs"):
+                    station.import_sign_in(args, "owner", "/data/synthetic-stage", local, SIGN_IN)
+            run.assert_called_once_with(args, "push", str(local), "/data/synthetic-stage", quiet=True)
+            read.assert_called_once_with(args, "/data/synthetic-stage", quiet=True)
+            shell.assert_not_called()
+
+    def test_manual_token_surface_is_gone(self):
+        for argv in (
+            ["station.py", "--ip", "192.0.2.1", "auth"],
+            ["station.py", "--ip", "192.0.2.1", "--session-json=synthetic-path", "login"],
+        ):
+            with (
+                self.subTest(argv=argv),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(station, "acquire") as acquire,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as rejected:
+                    station.main()
+                self.assertEqual(rejected.exception.code, 2)
+                acquire.assert_not_called()
+        self.configure()
+        result = self.run_make("auth", succeeds=False)
+        self.assertIn("No rule to make target", result.stderr)
 
 
 class UncertainCleanupTest(unittest.TestCase):
@@ -827,4 +815,8 @@ class UncertainCleanupTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:2] == ["--fake-station"]:
+        sys.argv = ["station.py", *sys.argv[2:]]
+        fake_station_main()
+    else:
+        unittest.main()

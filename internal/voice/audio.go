@@ -48,13 +48,34 @@ type audio struct {
 	nativeContext *malgo.AllocatedContext
 	playback      chan playbackBlock
 	playbackDrops atomic.Uint64
+	queueMu       sync.Mutex
+	finishing     atomic.Bool
+	drained       chan struct{}
+	ackDrain      func()
 	stopping      atomic.Bool
 	current       playbackBlock
 	currentAt     int
 }
 
 func newAudio(epoch *stationEpoch) *audio {
-	return &audio{epoch: epoch, playback: make(chan playbackBlock, 12)}
+	drained := make(chan struct{})
+	return &audio{epoch: epoch, playback: make(chan playbackBlock, 12), drained: drained, ackDrain: sync.OnceFunc(func() { close(drained) })}
+}
+
+func (a *audio) finish(ctx context.Context) error {
+	a.queueMu.Lock()
+	a.finishing.Store(true)
+	a.queueMu.Unlock()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-a.drained:
+		return context.Cause(ctx)
+	case <-deadline.C:
+		return fmt.Errorf("%w: playback did not finish received audio within 2 seconds", errStationAudio)
+	}
 }
 
 func (a *audio) open() error {
@@ -120,6 +141,10 @@ func (a *audio) callback(output, _ []byte, frames uint32) {
 	if !a.epoch.allowed() {
 		return
 	}
+	if a.finishing.Load() && a.currentAt >= a.current.used && len(a.playback) == 0 {
+		a.ackDrain()
+		return
+	}
 	for i := 0; i < min(int(frames), len(output)/4); i++ {
 		if !a.epoch.allowed() {
 			clear(output)
@@ -173,7 +198,7 @@ func (a *audio) send(ctx context.Context, track *webrtc.TrackLocalStaticSample, 
 			}
 			frame = next
 		}
-		if frame.epoch != a.epoch.number || !a.epoch.allowed() {
+		if frame.epoch != a.epoch.number || !a.epoch.allowed() || ctx.Err() != nil {
 			return nil
 		}
 		if haveFrame && frame.sequence != expected {
@@ -185,7 +210,7 @@ func (a *audio) send(ctx context.Context, track *webrtc.TrackLocalStaticSample, 
 		if err != nil {
 			return fmt.Errorf("%w: Opus capture encoding failed", errStationAudio)
 		}
-		if !a.epoch.allowed() {
+		if !a.epoch.allowed() || ctx.Err() != nil {
 			return nil
 		}
 		if err := track.WriteSample(media.Sample{Data: packet[:n], Duration: frameDuration}); err != nil {
@@ -198,7 +223,9 @@ func (a *audio) send(ctx context.Context, track *webrtc.TrackLocalStaticSample, 
 }
 
 func (a *audio) queueDecoded(pcm []int16) {
-	if !a.epoch.allowed() {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	if !a.epoch.allowed() || a.finishing.Load() {
 		return
 	}
 	for len(pcm) > 0 {
@@ -264,7 +291,7 @@ func (p *paddingOpusDepacketizer) Unmarshal(payload []byte) ([]byte, error) {
 	return p.OpusPacket.Unmarshal(payload)
 }
 
-func (a *audio) receive(ctx context.Context, track *webrtc.TrackRemote) error {
+func (a *audio) receive(ctx context.Context, track *webrtc.TrackRemote) (result error) {
 	codec := track.Codec()
 	if codec.MimeType != webrtc.MimeTypeOpus || codec.ClockRate != 48000 || codec.Channels != 2 {
 		return errors.New("unsupported remote audio codec")
@@ -317,6 +344,12 @@ func (a *audio) receive(ctx context.Context, track *webrtc.TrackRemote) error {
 		}
 		return nil
 	}
+	defer func() {
+		if context.Cause(ctx) == errProtocolHangup && a.epoch.allowed() {
+			buffer.Flush()
+			result = errors.Join(result, drain())
+		}
+	}()
 	stop := context.AfterFunc(ctx, func() { _ = track.SetReadDeadline(time.Now()) })
 	defer stop()
 	for {
