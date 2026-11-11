@@ -5,6 +5,15 @@
     "github>hu553in/common-things//presets/renovate/python"
   ],
   "enabledManagers": ["custom.regex", "github-actions", "gomod", "pep621"],
+  "packageRules": [
+    {
+      "description": "Disable automatic RTP major updates",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/pion/rtp"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ],
   "customManagers": [
     {
       "customType": "regex",
