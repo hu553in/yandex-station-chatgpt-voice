@@ -3,7 +3,7 @@ module yandex-station-chatgpt-voice
 go 1.27.4
 
 require (
-	github.com/gen2brain/malgo v0.11.27
+	github.com/gen2brain/malgo v0.11.28
 	github.com/hraban/opus v0.0.0-20260708213942-bde8e4304501
 	github.com/pion/logging v0.2.4
 	github.com/pion/rtcp v1.2.20
