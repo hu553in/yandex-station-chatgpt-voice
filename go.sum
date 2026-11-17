@@ -1,5 +1,5 @@
-github.com/gen2brain/malgo v0.11.27 h1:iD/VV+AYELEt1pK9O3efj3zu0p8oTA3Gp+9BWd/RNmI=
-github.com/gen2brain/malgo v0.11.27/go.mod h1:xLVG3ROA33Bzol1quF3e4ehqcFuqh8QK4B8T6LQUs/M=
+github.com/gen2brain/malgo v0.11.28 h1:fuGzm6nOz/3cDNSeTYO5LmE9B4bRqVj4KZT5WMm39HE=
+github.com/gen2brain/malgo v0.11.28/go.mod h1:xLVG3ROA33Bzol1quF3e4ehqcFuqh8QK4B8T6LQUs/M=
 github.com/google/go-cmdtest v0.4.1-0.20220921163831-55ab3332a786 h1:rcv+Ippz6RAtvaGgKxc+8FQIpxHgsF+HBzPyYL2cyVU=
 github.com/google/go-cmdtest v0.4.1-0.20220921163831-55ab3332a786/go.mod h1:apVn/GCasLZUVpAJ6oWAuyP7Ne7CEsQbTnc0plM3m+o=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
