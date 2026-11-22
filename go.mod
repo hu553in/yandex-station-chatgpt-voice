@@ -10,7 +10,7 @@ require (
 	github.com/pion/rtp v1.10.6
 	github.com/pion/sctp v1.12.1
 	github.com/pion/transport/v5 v5.1.5
-	github.com/pion/webrtc/v4 v4.2.26
+	github.com/pion/webrtc/v4 v4.2.27
 	golang.org/x/sys v0.50.0
 	google.golang.org/protobuf v1.36.12
 )
