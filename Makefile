@@ -14,9 +14,9 @@ JOBS ?= 2
 -include config.mk
 export GO UV PYTHON JOBS MAKE
 
-ACTIONLINT := bunx github-actionlint
-TAPLO := bunx @taplo/cli
-SHELLCHECK := bunx shellcheck
+ACTIONLINT := bunx --minimum-release-age 259200 github-actionlint
+TAPLO := bunx --minimum-release-age 259200 @taplo/cli
+SHELLCHECK := bunx --minimum-release-age 259200 shellcheck
 SHFMT ?= shfmt
 C_FILES := $(wildcard internal/voice/*.c internal/voice/*.h internal/voice/testdata/*.c)
 GO_HOST := CGO_ENABLED=1 GOOS="$$($(GO) env GOHOSTOS)" GOARCH="$$($(GO) env GOHOSTARCH)"
@@ -120,10 +120,6 @@ check-c:
 		$(UV) run --locked clang-tidy internal/voice/station_native.c internal/voice/testdata/spotter_abi.c -- -std=c11 -Wall -Wextra -Werror; \
 	fi
 
-.PHONY: check-renovate
-check-renovate:
-	bunx --package renovate renovate-config-validator --strict --no-global renovate.json
-
 .PHONY: check-workflows
 check-workflows:
 	$(ACTIONLINT)
@@ -145,7 +141,7 @@ vet:
 	$(GO_HOST) $(GO) vet -mod=readonly -tags=nolibopusfile ./...
 
 .PHONY: check
-check: lint check-git check-types check-deps check-vulns check-unused check-security check-c test vet build check-renovate check-workflows
+check: lint check-git check-types check-deps check-vulns check-unused check-security check-c test vet build check-workflows
 
 .PHONY: check-fix
 check-fix: lint-fix

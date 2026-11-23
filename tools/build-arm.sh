@@ -35,6 +35,7 @@ for tool in "$GO" "$UV" "$PYTHON" "$MAKE" pkg-config curl tar; do
 done
 
 ZIG_VERSION=0.17.1
+ZIG_EXCLUDE_NEWER=3d
 OPUS_VERSION=1.6.1
 OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
 
@@ -53,11 +54,11 @@ for compiler in cc ar ranlib; do
   case "$compiler" in cc) flags=' -target arm-linux-gnueabihf.2.30 -mcpu=cortex_a7' ;; *) flags= ;; esac
   # Keep UV and positional arguments literal for the generated wrapper.
   # shellcheck disable=SC2016
-  printf '#!/bin/sh\nexec "${UV:-uv}" tool run --from ziglang==%s python-zig %s%s "$@"\n' "$ZIG_VERSION" "$compiler" "$flags" > "$wrapper"
+  printf '#!/bin/sh\nexec "${UV:-uv}" tool run --exclude-newer %s --from ziglang==%s python-zig %s%s "$@"\n' "$ZIG_EXCLUDE_NEWER" "$ZIG_VERSION" "$compiler" "$flags" > "$wrapper"
   chmod 755 "$wrapper"
 done
 export UV
-[ "$("$UV" tool run --from "ziglang==$ZIG_VERSION" python-zig version)" = "${ZIG_VERSION%.post*}" ] || {
+[ "$("$UV" tool run --exclude-newer "$ZIG_EXCLUDE_NEWER" --from "ziglang==$ZIG_VERSION" python-zig version)" = "${ZIG_VERSION%.post*}" ] || {
   echo 'Unexpected Zig version.' >&2
   exit 1
 }

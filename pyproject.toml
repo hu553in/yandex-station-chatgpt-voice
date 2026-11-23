@@ -26,7 +26,6 @@ dev = [
 [tool.uv]
 package = false
 link-mode = "copy"
-# Matches the Renovate minimumReleaseAge, so lockfile maintenance waits too.
 exclude-newer = "3 days"
 
 [tool.ruff]

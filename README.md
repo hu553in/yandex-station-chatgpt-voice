@@ -548,9 +548,9 @@ make check
 ```
 
 This checks formatting, Go/Python/C/shell lint, types, dependencies, known vulnerabilities, unused
-code, Bandit, host tests, the ARM build, Renovate and GitHub Actions. Tests use local fixtures,
-virtual Pion packets and a local HTTPS server. They do not contact a Station or ChatGPT.
-`make lint-fix` applies supported fixes; `make check-fix` applies them and then repeats all checks.
+code, Bandit, host tests, the ARM build, and GitHub Actions. Tests use local fixtures, virtual Pion
+packets and a local HTTPS server. They do not contact a Station or ChatGPT. `make lint-fix` applies
+supported fixes; `make check-fix` applies them and then repeats all checks.
 
 `make check` does not need a browser. To check installed Chrome against a synthetic local page, with
 no account or ChatGPT traffic, run:
@@ -563,11 +563,8 @@ Add `STATION_BROWSER_HEADED=1` to watch the window, or `CHROME=/path/to/chrome` 
 browser. This proves browser handling only, not a real ChatGPT sign-in.
 
 Go dependencies and tools live in `go.mod`; Python dependencies, including Playwright, live in
-`pyproject.toml` and `uv.lock`. Renovate extends the shared
-[Go](https://github.com/hu553in/common-things/blob/main/presets/renovate/go.json) and
-[Python](https://github.com/hu553in/common-things/blob/main/presets/renovate/python.json) presets.
-The build script declares Zig and Opus once; Renovate updates Opus and its archive checksum
-together. The shared presets and uv wait three days for new package releases.
+`pyproject.toml` and `uv.lock`. Update Opus and its archive checksum together in the build script.
+uv waits three days for new package releases, including the Zig distribution used by the ARM build.
 
 After `make install-deps`, enable the project checks and Conventional Commit hooks once per clone:
 

@@ -695,11 +695,8 @@ func TestDataChannelReceiveBoundAndCleanShutdown(t *testing.T) {
 }
 
 func TestOversizedDataChannelReceive(t *testing.T) {
-	for _, tc := range []struct {
-		size int
-		want string
-	}{{256*1024 + 1, "voice event exceeds 256 KiB"}, {512 * 1024, "voice event exceeds 256 KiB"}} {
-		t.Run(strconv.Itoa(tc.size), func(t *testing.T) {
+	for _, size := range []int{256*1024 + 1, 512 * 1024} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			a, b := localPeer(ctx, t), localPeer(ctx, t)
@@ -711,7 +708,7 @@ func TestOversizedDataChannelReceive(t *testing.T) {
 			advertised := strings.Replace(offer, "a=max-message-size:262144", "a=max-message-size:1048576", 1)
 			answerLocalOffer(ctx, t, a, b, advertised)
 			data := `{"type":"future_event","message":"private-marker"}`
-			data += strings.Repeat(" ", tc.size-len(data))
+			data += strings.Repeat(" ", size-len(data))
 			if sendTextErr := b.dc.SendText(data); sendTextErr != nil {
 				t.Fatal("fixture did not send the oversized message", sendTextErr)
 			}
@@ -720,11 +717,13 @@ func TestOversizedDataChannelReceive(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("oversized receive did not terminate the peer")
 			}
-			if got := a.outcome(
-				context.Cause(a.ctx),
-			); got == nil || !strings.Contains(got.Error(), tc.want) ||
-				strings.Contains(got.Error(), "private-marker") {
+			// Pion resets the stream at its receive limit before invoking the message parser.
+			got := a.outcome(context.Cause(a.ctx))
+			if got == nil || strings.Contains(got.Error(), "private-marker") {
 				t.Fatal("oversized receive lost its safe failure", got)
+			}
+			if !errors.Is(got, errRemoteClosed) && !strings.Contains(got.Error(), "voice control channel failed") {
+				t.Fatal("oversized receive did not produce a transport failure", got)
 			}
 		})
 	}
