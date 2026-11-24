@@ -139,7 +139,8 @@ linters:
 
     exhaustive:
       # Protobuf field numbers are an open wire schema, not a closed enum.
-      ignore-types: google.golang.org/protobuf/encoding/protowire.Number
+      ignore-types:
+        - google.golang.org/protobuf/encoding/protowire.Number
       check:
         - switch
         - mapliteral

@@ -15,7 +15,6 @@ JOBS ?= 2
 export GO UV PYTHON JOBS MAKE
 
 ACTIONLINT := bunx --minimum-release-age 259200 github-actionlint
-TAPLO := bunx --minimum-release-age 259200 @taplo/cli
 SHELLCHECK := bunx --minimum-release-age 259200 shellcheck
 SHFMT ?= shfmt
 C_FILES := $(wildcard internal/voice/*.c internal/voice/*.h internal/voice/testdata/*.c)
@@ -64,7 +63,6 @@ install-deps:
 lint:
 	$(host-check)
 	bun fmt --check
-	$(TAPLO) fmt --check
 	$(GO_HOST) golangci-lint fmt --diff
 	$(GO_HOST) golangci-lint run
 	$(UV) run --locked ruff check
@@ -76,16 +74,15 @@ lint:
 .PHONY: lint-fix
 lint-fix:
 	bun fmt
-	$(TAPLO) fmt
 	$(GO_HOST) golangci-lint fmt
 	$(UV) run --locked ruff check --fix
 	$(UV) run --locked ruff format
 	$(UV) run --locked clang-format -i $(C_FILES)
 	$(SHFMT) -ln posix -i 2 -ci -sr -w tools/build-arm.sh
 
-.PHONY: check-git
-check-git:
-	$(UV) run --locked prek validate-config prek.toml
+.PHONY: check-hooks
+check-hooks:
+	bunx --minimum-release-age 259200 lefthook validate
 
 .PHONY: check-types
 check-types:
@@ -95,7 +92,6 @@ check-types:
 check-deps:
 	$(GO) mod tidy -diff
 	$(GO) mod verify
-	$(UV) lock --check
 	$(UV) run --locked deptry .
 
 .PHONY: check-vulns
@@ -131,7 +127,7 @@ endef
 
 .PHONY: test
 test:
-	PYTHONDONTWRITEBYTECODE=1 $(UV) run --locked python -m unittest discover -s tools -p 'test_*.py'
+	PYTHONDONTWRITEBYTECODE=1 $(UV) run --locked --no-dev python -m unittest discover -s tools -p 'test_*.py'
 	$(host-check)
 	$(GO_HOST) $(GO) test -mod=readonly -tags=nolibopusfile -race -count=1 -timeout=60s ./...
 
@@ -141,7 +137,7 @@ vet:
 	$(GO_HOST) $(GO) vet -mod=readonly -tags=nolibopusfile ./...
 
 .PHONY: check
-check: lint check-git check-types check-deps check-vulns check-unused check-security check-c test vet build check-workflows
+check: lint check-hooks check-types check-deps check-vulns check-unused check-security check-c test vet build check-workflows
 
 .PHONY: check-fix
 check-fix: lint-fix

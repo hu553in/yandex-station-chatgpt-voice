@@ -120,7 +120,7 @@ home-network address, for example `192.168.1.50`. A DHCP reservation can keep it
 Each project has its own `config.mk`. Create the file in this Voice project once:
 
 ```sh
-cp config.example.mk config.mk
+if [ ! -e config.mk ] && [ ! -L config.mk ]; then cp config.example.mk config.mk; fi
 nano config.mk
 ```
 
@@ -522,7 +522,7 @@ Root access and the original Alice services remain.
 ## Developer checks
 
 Normal installation does not need these checks. For development, install
-[Bun](https://bun.sh/docs/installation), [Node.js](https://nodejs.org/),
+[Bun](https://bun.sh/docs/installation),
 [golangci-lint](https://golangci-lint.run/docs/welcome/install/local/) and
 [shfmt](https://github.com/mvdan/sh), plus host Opus and a C compiler:
 
@@ -564,12 +564,11 @@ browser. This proves browser handling only, not a real ChatGPT sign-in.
 
 Go dependencies and tools live in `go.mod`; Python dependencies, including Playwright, live in
 `pyproject.toml` and `uv.lock`. Update Opus and its archive checksum together in the build script.
-uv waits three days for new package releases, including the Zig distribution used by the ARM build.
 
 After `make install-deps`, enable the project checks and Conventional Commit hooks once per clone:
 
 ```sh
-uv run --locked prek install
+bunx lefthook install
 ```
 
 `make build` targets Linux ARMv7 with the hard-float ABI. Its compiler wrappers and static ARM Opus

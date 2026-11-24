@@ -30,6 +30,7 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           install-only: true
+      - run: golangci-lint config verify
       - uses: hu553in/common-things/.github/actions/setup-shfmt@main
       - run: make install-deps
       - env:
