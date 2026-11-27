@@ -49,18 +49,21 @@ func TestFixedOriginSignalingAndFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		status     int
+		mitigated  string
 		body, want string
 	}{
-		{"ok", 200, "v=0\r\ns=test\r\n", ""},
-		{"created", 201, "v=0\ns=test\n", ""},
-		{"unauthorized", 401, private, "make login"},
-		{"forbidden", 403, private, "entitlement"},
-		{"quota", 429, private, "429"},
-		{"bad settings", 400, private, "400"},
-		{"unprocessable", 422, private, "422"},
-		{"invalid SDP", 200, private, "SDP answer"},
-		{"large answer", 200, "v=0\r\n" + strings.Repeat("x", maxAnswerBytes), "1 MiB"},
-		{"redirect", 307, private, "307"},
+		{"ok", 200, "", "v=0\r\ns=test\r\n", ""},
+		{"created", 201, "", "v=0\ns=test\n", ""},
+		{"unauthorized", 401, "", private, "make login"},
+		{"forbidden", 403, private, private, "signaling returned HTTP 403"},
+		{"Cloudflare challenge", 403, "challenge", private, "received a Cloudflare challenge (HTTP 403)"},
+		{"Cloudflare challenge with unavailable status", 503, "challenge", private, "received a Cloudflare challenge (HTTP 503)"},
+		{"quota", 429, "", private, "429"},
+		{"bad settings", 400, "", private, "400"},
+		{"unprocessable", 422, "", private, "422"},
+		{"invalid SDP", 200, "", private, "SDP answer"},
+		{"large answer", 200, "", "v=0\r\n" + strings.Repeat("x", maxAnswerBytes), "1 MiB"},
+		{"redirect", 307, "", private, "307"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests := 0
@@ -111,9 +114,17 @@ func TestFixedOriginSignalingAndFailures(t *testing.T) {
 				if _, ok := payload["backend_thinking_effort"]; ok {
 					t.Fatal("disabled effort reached multipart")
 				}
+				header := http.Header{"Location": []string{"https://example.invalid/steal"}}
+				if tc.status == http.StatusForbidden {
+					header.Set("Content-Type", "text/html")
+					header.Set("Server", "cloudflare")
+				}
+				if tc.mitigated != "" {
+					header.Set("Cf-Mitigated", tc.mitigated)
+				}
 				return &http.Response{
 					StatusCode: tc.status,
-					Header:     http.Header{"Location": []string{"https://example.invalid/steal"}},
+					Header:     header,
 					Body:       io.NopCloser(strings.NewReader(tc.body)),
 					Request:    req,
 				}, nil
@@ -262,10 +273,34 @@ func TestCancellationDuringICEGathering(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.close()
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-	defer cancel()
-	if offer, offerErr := p.offer(ctx); offerErr == nil || offer != "" {
-		t.Fatal("unfinished ICE gathering returned a successful offer")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(context.Canceled)
+	if deadlineErr := blackhole.SetReadDeadline(time.Now().Add(5 * time.Second)); deadlineErr != nil {
+		t.Fatal(deadlineErr)
+	}
+	request := make(chan error, 1)
+	go func() {
+		var packet [1024]byte
+		_, _, readErr := blackhole.ReadFrom(packet[:])
+		cancel(errSetupTimeout)
+		request <- readErr
+	}()
+	if offer, offerErr := p.offer(ctx); !errors.Is(offerErr, errSetupTimeout) || offer != "" {
+		t.Fatal("unfinished ICE gathering lost the setup timeout", offerErr)
+	}
+	if readErr := <-request; readErr != nil {
+		t.Fatal("ICE gathering did not send a STUN request", readErr)
+	}
+}
+
+func TestClosedPeerOfferPreservesCancellation(t *testing.T) {
+	p := localPeer(t.Context(), t)
+	p.cancel(errAlicePriority)
+	if err := p.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.offer(t.Context()); !errors.Is(err, errAlicePriority) {
+		t.Fatal("offer lost the peer cancellation", err)
 	}
 }
 

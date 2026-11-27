@@ -2,6 +2,7 @@ package voice
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -31,6 +32,7 @@ const maxSCTPReceiveBufferBytes = 1 << 20
 
 var errRemoteClosed = errors.New("remote voice connection closed")
 var errProtocolHangup = errors.New("voice protocol hangup")
+var errSetupTimeout = errors.New("voice connection setup timed out")
 
 type peer struct {
 	pc        *webrtc.PeerConnection
@@ -254,26 +256,22 @@ func (p *peer) offer(ctx context.Context) (string, error) {
 	}
 	offer, err := p.pc.CreateOffer(nil)
 	if err != nil {
-		return "", errors.New("cannot create voice offer")
+		return "", cmp.Or(context.Cause(ctx), context.Cause(p.ctx), errors.New("cannot create voice offer"))
 	}
 	gathered := webrtc.GatheringCompletePromise(p.pc)
-	if p.pc.SetLocalDescription(offer) != nil {
-		return "", errors.New("cannot set voice offer")
+	if err = p.pc.SetLocalDescription(offer); err != nil {
+		return "", cmp.Or(context.Cause(ctx), context.Cause(p.ctx), errors.New("cannot set voice offer"))
 	}
-	gatherCtx, cancel := context.WithTimeout(ctx, setupTimeout)
-	defer cancel()
 	select {
-	case <-gatherCtx.Done():
-		if ctx.Err() != nil {
-			return "", context.Cause(ctx)
-		}
-		return "", errors.New("ICE gathering did not complete before timeout")
+	case <-ctx.Done():
 	case <-p.ctx.Done():
-		return "", context.Cause(p.ctx)
 	case <-gathered:
 	}
-	if gatherCtx.Err() != nil {
-		return "", errors.New("ICE gathering did not complete before cancellation or timeout")
+	if cause := context.Cause(ctx); cause != nil {
+		return "", cause
+	}
+	if cause := context.Cause(p.ctx); cause != nil {
+		return "", cause
 	}
 	description := p.pc.LocalDescription()
 	if description == nil || p.pc.ICEGatheringState() != webrtc.ICEGatheringStateComplete {
@@ -356,12 +354,18 @@ func exchangeOffer(
 		return "", errors.New("voice signaling HTTPS request failed; check network, TLS, and service availability")
 	}
 	defer response.Body.Close()
+	if response.Header.Get("Cf-Mitigated") == "challenge" {
+		return "", fmt.Errorf(
+			"ChatGPT Voice request received a Cloudflare challenge (HTTP %d); check the Station's network",
+			response.StatusCode,
+		)
+	}
 	switch response.StatusCode {
 	case http.StatusUnauthorized:
 		return "", errors.New("ChatGPT rejected the web session (401); run make login on the computer")
 	case http.StatusForbidden:
 		return "", errors.New(
-			"ChatGPT rejected voice access (403); account entitlement or edge restrictions may prevent this native client",
+			"ChatGPT voice signaling returned HTTP 403; check browser Voice access on the Station's network",
 		)
 	case http.StatusOK, http.StatusCreated:
 	default:
@@ -430,12 +434,8 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 		}
 		capture.beginDraining()
 		workers.Wait()
-		cleanup := p.close()
-		if failure := p.outcome(errProtocolHangup); failure != nil {
-			return errors.Join(failure, cleanup)
-		}
-		if cleanup != nil {
-			return cleanup
+		if p.close() != nil || p.outcome(cause) != nil {
+			return cause
 		}
 		if playbackOpened {
 			e.report.Print("Voice call ended by ChatGPT; finishing received audio.")
@@ -449,11 +449,8 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 		e.revoke(context.Canceled)
 		return errors.Join(e.output.close(), p.close())
 	})
-	stopShutdown := context.AfterFunc(e.ctx, func() { _ = shutdown() })
 	defer func() {
-		e.revoke(context.Canceled)
 		cleanupErr := shutdown()
-		stopShutdown()
 		workers.Wait()
 		result = p.outcome(result)
 		if cleanupErr != nil {
@@ -466,11 +463,11 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 		}
 	})
 	defer stopPeerCancel()
-	setupCtx, finishSetup := context.WithTimeout(ctx, setupTimeout)
+	setupCtx, finishSetup := context.WithTimeoutCause(ctx, setupTimeout, errSetupTimeout)
 	defer finishSetup()
 	stopSetupTimeout := context.AfterFunc(setupCtx, func() {
-		if errors.Is(setupCtx.Err(), context.DeadlineExceeded) {
-			e.revoke(errors.New("voice connection setup timed out"))
+		if errors.Is(context.Cause(setupCtx), errSetupTimeout) {
+			e.revoke(errSetupTimeout)
 		}
 	})
 	defer stopSetupTimeout()
@@ -486,47 +483,40 @@ func runCall(e *stationEpoch, sessionFile string, capture *stationCapture, setti
 	if err != nil {
 		return complete(err)
 	}
-	if ctx.Err() != nil {
-		return complete(context.Cause(ctx))
+	if cause := context.Cause(setupCtx); cause != nil {
+		return complete(cause)
 	}
 	if err = p.accept(answer); err != nil {
 		return err
 	}
-	ready := false
-	for !ready {
-		select {
-		case <-setupCtx.Done():
-			if ctx.Err() != nil {
-				return complete(context.Cause(ctx))
-			}
-			return errors.New("voice connection setup timed out")
-		case <-p.ready:
-			ready = true
-		}
+	// Closing Pion during SDP application can remove the ICE agent it is still using.
+	stopShutdown := context.AfterFunc(e.ctx, func() { _ = shutdown() })
+	defer stopShutdown()
+	select {
+	case <-setupCtx.Done():
+	case <-p.ready:
 	}
-	if ctx.Err() != nil {
-		return complete(context.Cause(ctx))
-	}
-	if setupCtx.Err() != nil {
-		return errors.New("voice setup ended before media became ready")
+	if cause := context.Cause(setupCtx); cause != nil {
+		return complete(cause)
 	}
 	if err = e.output.open(); err != nil {
 		return err
 	}
 	playbackOpened = true
-	if ctx.Err() != nil {
-		return complete(context.Cause(ctx))
+	if cause := context.Cause(setupCtx); cause != nil {
+		return complete(cause)
 	}
-	if setupCtx.Err() != nil {
-		return errors.New("voice setup ended while opening playback")
-	}
-	if err = playCue(setupCtx, readyCueFrequency); err != nil {
-		return complete(err)
-	}
-	if err = capture.beginStreaming(setupCtx); err != nil {
+	e.readyPlayerStarted, err = playCue(setupCtx, readyCueFrequency)
+	if err != nil {
 		return complete(err)
 	}
 	finishSetup()
+	if cause := context.Cause(setupCtx); cause != context.Canceled {
+		return complete(cause)
+	}
+	if err = capture.beginStreaming(ctx); err != nil {
+		return complete(err)
+	}
 	e.report.Print("Voice media ready.")
 	workers.Go(func() {
 		if sendErr := e.output.send(ctx, p.mic, capture.input); sendErr != nil {

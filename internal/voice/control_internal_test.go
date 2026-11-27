@@ -96,6 +96,7 @@ func TestFailureAfterHangupSuppressesTailAndCompletionCue(t *testing.T) {
 				<-ctx.Done()
 				return ctx.Err()
 			}
+			e.readyPlayerStarted = true
 			p, err := newPeer(e.ctx, webrtc.SettingEngine{}, nil, log.New(io.Discard, "", 0), e.revoke)
 			if err != nil {
 				return err
@@ -108,7 +109,7 @@ func TestFailureAfterHangupSuppressesTailAndCompletionCue(t *testing.T) {
 			e.output.callback(pcm, nil, 1)
 			tailLeaked = !allZero(pcm)
 			return voiceCallError{p.outcome(context.Cause(p.ctx))}
-		}, func(context.Context) error { cues++; return nil })
+		}, func(context.Context, cueFrequency) error { cues++; return nil })
 	}()
 	if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
 		t.Fatal(err)
@@ -192,6 +193,7 @@ func TestControlTerminationCompletionCue(t *testing.T) {
 				done <- serveStation(ctx, client, io.Discard, func(e *stationEpoch, _ *stationGate) error {
 					attempts++
 					if attempts == 1 {
+						e.readyPlayerStarted = true
 						e.revoke(context.Cause(a.ctx))
 						if result != nil {
 							return voiceCallError{result}
@@ -201,7 +203,7 @@ func TestControlTerminationCompletionCue(t *testing.T) {
 					close(rearmed)
 					<-e.ctx.Done()
 					return context.Cause(e.ctx)
-				}, func(context.Context) error { cues++; return nil })
+				}, func(context.Context, cueFrequency) error { cues++; return nil })
 			}()
 			if _, err := server.Write(framedIPC(3, wireInt(nil, 1, 0))); err != nil {
 				t.Fatal(err)

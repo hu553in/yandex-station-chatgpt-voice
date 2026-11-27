@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gen2brain/malgo"
@@ -37,8 +38,16 @@ const maxOpusSamples = 5760
 const playbackDrainTimeout = 2 * time.Second
 const cueTimeout = 2 * time.Second
 const cueVolume = 0.3
-const readyCueFrequency = 880
-const endCueFrequency = 440
+
+var errCueTimeout = errors.New("voice cue playback timed out")
+
+type cueFrequency float64
+
+const (
+	readyCueFrequency   cueFrequency = 880
+	endCueFrequency     cueFrequency = 440
+	failureCueFrequency cueFrequency = 660
+)
 
 const captureSamples = 320
 const samplesPerFrame = 960
@@ -90,12 +99,16 @@ func (a *audio) finish(ctx context.Context) error {
 	defer deadline.Stop()
 	select {
 	case <-ctx.Done():
-		return context.Cause(ctx)
 	case <-a.drained:
-		return context.Cause(ctx)
 	case <-deadline.C:
-		return fmt.Errorf("%w: playback did not finish received audio within 2 seconds", errStationAudio)
+		select {
+		case <-ctx.Done():
+		case <-a.drained:
+		default:
+			return fmt.Errorf("%w: playback did not finish received audio within 2 seconds", errStationAudio)
+		}
 	}
+	return context.Cause(ctx)
 }
 
 func (a *audio) open() error {
@@ -264,27 +277,30 @@ func (a *audio) queueDecoded(pcm []int16) {
 	}
 }
 
-func cuePCM(frequency float64) []int16 {
-	const frames = 48000 * 150 / 1000
-	const fade = 48000 * 10 / 1000
-	pcm := make([]int16, frames*stereoChannels)
-	for i := range frames {
-		gain := cueVolume * min(1, float64(i)/fade, float64(frames-1-i)/fade)
-		sample := int16(gain * math.Sin(2*math.Pi*frequency*float64(i)/playbackSampleRate) * math.MaxInt16)
-		pcm[i*2], pcm[i*2+1] = sample, sample
+func cuePCM(frequency cueFrequency) []int16 {
+	const toneFrames = playbackSampleRate * 150 / 1000
+	const gapFrames = playbackSampleRate * 50 / 1000
+	const fadeFrames = playbackSampleRate * 10 / 1000
+	tone := make([]int16, toneFrames*stereoChannels)
+	for i := range toneFrames {
+		gain := cueVolume * min(1, float64(i)/fadeFrames, float64(toneFrames-1-i)/fadeFrames)
+		sample := int16(gain * math.Sin(2*math.Pi*float64(frequency)*float64(i)/playbackSampleRate) * math.MaxInt16)
+		tone[i*2], tone[i*2+1] = sample, sample
 	}
+	if frequency != failureCueFrequency {
+		return tone
+	}
+	pcm := make([]int16, (2*toneFrames+gapFrames)*stereoChannels)
+	copy(pcm, tone)
+	copy(pcm[(toneFrames+gapFrames)*stereoChannels:], tone)
 	return pcm
 }
 
-func playEndCue(ctx context.Context) error {
-	return playCue(ctx, endCueFrequency)
-}
-
-func playCue(parent context.Context, frequency float64) error {
-	ctx, cancel := context.WithTimeout(parent, cueTimeout)
+func playCue(parent context.Context, frequency cueFrequency) (bool, error) {
+	ctx, cancel := context.WithTimeoutCause(parent, cueTimeout, errCueTimeout)
 	defer cancel()
 	if ctx.Err() != nil {
-		return context.Cause(ctx)
+		return false, context.Cause(ctx)
 	}
 	pcm := cuePCM(frequency)
 	data := make([]byte, len(pcm)*pcmSampleBytes)
@@ -306,14 +322,46 @@ func playCue(parent context.Context, frequency float64) error {
 		"-c",
 		"2",
 	)
-	cmd.Stdin = bytes.NewReader(data)
-	if err := cmd.Run(); err != nil {
-		if cause := context.Cause(ctx); cause != nil {
-			return cause
+	return runCue(ctx, cmd, data)
+}
+
+func runCue(ctx context.Context, cmd *exec.Cmd, data []byte) (bool, error) {
+	cmd.Stdin = cueInput{ctx: ctx, pcm: bytes.NewReader(data)}
+	var killed atomic.Bool
+	if cancel := cmd.Cancel; cancel != nil {
+		cmd.Cancel = func() error {
+			err := cancel()
+			killed.Store(err == nil)
+			return err
 		}
-		return fmt.Errorf("cannot play voice cue: %w", err)
 	}
-	return nil
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		var status syscall.WaitStatus
+		if killed.Load() && cmd.ProcessState != nil {
+			status, _ = cmd.ProcessState.Sys().(syscall.WaitStatus)
+		}
+		// CommandContext uses SIGKILL to stop the player.
+		if status.Signal() == syscall.SIGKILL || errors.Is(err, ctx.Err()) || errors.Is(err, cause) {
+			return cmd.Process != nil, cause
+		}
+	}
+	return cmd.Process != nil, fmt.Errorf("cannot play voice cue: %w", err)
+}
+
+type cueInput struct {
+	ctx context.Context
+	pcm *bytes.Reader
+}
+
+func (input cueInput) Read(p []byte) (int, error) {
+	if err := context.Cause(input.ctx); err != nil {
+		return 0, err
+	}
+	return input.pcm.Read(p)
 }
 
 type paddingOpusDepacketizer struct {

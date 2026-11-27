@@ -1,12 +1,15 @@
 package voice
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"math"
+	"os/exec"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -120,16 +123,25 @@ func TestPlaybackSetupCancellationIsNotANativeFault(t *testing.T) {
 }
 
 func TestCuePCMHasDistinctFadedTones(t *testing.T) {
+	const toneFrames = 7200
+	const toneBytes = toneFrames * 4
+	const gapBytes = 2400 * 4
 	for _, tc := range []struct {
-		name             string
-		frequency, other float64
-	}{{"ready", 880, 440}, {"completion", 440, 880}} {
+		name      string
+		cue       cueFrequency
+		frequency float64
+		pulses    int
+	}{
+		{"ready", readyCueFrequency, 880, 1},
+		{"completion", endCueFrequency, 440, 1},
+		{"failure", failureCueFrequency, 660, 2},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pcm := cuePCM(tc.frequency)
-			if len(pcm) != 7200*2 {
-				t.Fatal("cue is not 150 ms of stereo 48 kHz PCM")
-			}
+			pcm := cuePCM(tc.cue)
 			data := make([]byte, len(pcm)*2)
+			if len(data) != tc.pulses*toneBytes+(tc.pulses-1)*gapBytes {
+				t.Fatal("cue does not have the expected duration at 48 kHz stereo")
+			}
 			for i, sample := range pcm {
 				if sample > 9831 || sample < -9831 {
 					t.Fatal("cue exceeds 0.3 volume")
@@ -140,18 +152,106 @@ func TestCuePCMHasDistinctFadedTones(t *testing.T) {
 				//nolint:gosec // PCM uses the same 16 bits for signed samples and little-endian words.
 				binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
 			}
-			if !goodTone(data, tc.frequency, tc.other) || !allZero(data[:4]) || !allZero(data[len(data)-4:]) {
-				t.Fatal("cue is not the expected distinct faded tone")
+			for pulse := range tc.pulses {
+				offset := pulse * (toneBytes + gapBytes)
+				tone := data[offset : offset+toneBytes]
+				var energy float64
+				for i := range toneFrames {
+					sample := float64(pcm[offset/2+i*2])
+					energy += sample * sample
+				}
+				energyAtFrequency := 2 * tonePower(tone, tc.frequency) / toneFrames
+				if energy/toneFrames <= 1e6 || energyAtFrequency <= 0.9*energy ||
+					!allZero(tone[:4]) || !allZero(tone[len(tone)-4:]) {
+					t.Fatal("cue is not the expected distinct faded tone")
+				}
+			}
+			if tc.pulses == 2 && !allZero(data[toneBytes:toneBytes+gapBytes]) {
+				t.Fatal("the two failure tones must be separated by silence")
 			}
 		})
 	}
 }
 
-func TestCanceledCompletionDoesNotStartPlayback(t *testing.T) {
+func TestCanceledCueDoesNotStartPlayback(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	cancel(errAlicePriority)
-	if err := playEndCue(ctx); !errors.Is(err, errAlicePriority) {
-		t.Fatal("canceled completion attempted playback", err)
+	if started, err := playCue(ctx, failureCueFrequency); started || !errors.Is(err, errAlicePriority) {
+		t.Fatal("canceled cue attempted playback", err)
+	}
+}
+
+func TestCuePlayerLaunchStatus(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(errAlicePriority)
+	t.Run("failed launch", func(t *testing.T) {
+		invalid := exec.CommandContext(t.Context(), "/dev/null/player")
+		if started, err := runCue(ctx, invalid, nil); started || !errors.Is(err, syscall.ENOTDIR) {
+			t.Fatal("player launch failure was hidden or reported as started", started, err)
+		}
+	})
+	for _, tc := range []struct {
+		name     string
+		player   *exec.Cmd
+		exitCode int
+	}{
+		{"nonzero exit", exec.CommandContext(t.Context(), "/bin/sh", "-c", "exit 7"), 7},
+		{"signal termination", exec.CommandContext(t.Context(), "/bin/sh", "-c", `kill -TERM "$$"`), -1},
+		{"independent SIGKILL", exec.CommandContext(t.Context(), "/bin/sh", "-c", `kill -KILL "$$"`), -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			started, err := runCue(ctx, tc.player, nil)
+			exit, ok := errors.AsType[*exec.ExitError](err)
+			if !started || !ok || exit.ExitCode() != tc.exitCode {
+				t.Fatal("launched player lost its exit status", started, err)
+			}
+		})
+	}
+}
+
+type cueCancelWriter struct{ cancel context.CancelCauseFunc }
+
+func (w cueCancelWriter) Write(p []byte) (int, error) {
+	w.cancel(errAlicePriority)
+	return len(p), nil
+}
+
+func TestCueCancellationStopsRunningPlayer(t *testing.T) {
+	deadline, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	ctx, cancel := context.WithCancelCause(deadline)
+	defer cancel(context.Canceled)
+	player := exec.CommandContext(ctx, "/bin/sh", "-c", `printf ready; kill -STOP "$$"`)
+	player.Stdout = cueCancelWriter{cancel: cancel}
+	if started, err := runCue(ctx, player, nil); !started || !errors.Is(err, errAlicePriority) {
+		t.Fatal("player killed during cancellation lost the cancellation cause", started, err)
+	}
+}
+
+func TestCuePlayerReceivesOnlyAllowedPCM(t *testing.T) {
+	pcm := []byte{1, 0, 2, 0}
+	for _, tc := range []struct {
+		name  string
+		cause error
+		want  []byte
+	}{
+		{name: "live", want: pcm},
+		{name: "revoked before reading stdin", cause: errAlicePriority},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputCtx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(context.Canceled)
+			if tc.cause != nil {
+				cancel(tc.cause)
+			}
+			var received bytes.Buffer
+			player := exec.CommandContext(t.Context(), "/bin/cat")
+			player.Stdout = &received
+			started, err := runCue(inputCtx, player, pcm)
+			if !started || !errors.Is(err, tc.cause) || !bytes.Equal(received.Bytes(), tc.want) {
+				t.Fatal("unexpected player input or result", received.Bytes(), started, err)
+			}
+		})
 	}
 }
 

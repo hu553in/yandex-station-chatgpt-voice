@@ -49,7 +49,7 @@ func TestWakeAdmissionPreservesFatalCaptureFailure(t *testing.T) {
 			}
 			e.revoke(errCaptureOverflow)
 			return gate.activate(e)
-		}, func(context.Context) error {
+		}, func(context.Context, cueFrequency) error {
 			cues++
 			return nil
 		})

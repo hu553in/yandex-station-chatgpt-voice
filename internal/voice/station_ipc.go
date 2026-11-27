@@ -339,7 +339,8 @@ func readAlice(ctx context.Context, conn net.Conn, gate *stationGate) error {
 	}
 }
 
-func readCapture(ctx context.Context, conn net.Conn, capture *stationCapture) error {
+func (c *stationCapture) readPCM(conn net.Conn) error {
+	ctx := c.epoch.ctx
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	defer conn.Close()
@@ -370,7 +371,7 @@ func readCapture(ctx context.Context, conn net.Conn, capture *stationCapture) er
 			if len(pcm) > 0 {
 				progress = time.Now()
 			}
-			if pushPCMErr := capture.pushPCM(pcm); pushPCMErr != nil {
+			if pushPCMErr := c.pushPCM(pcm); pushPCMErr != nil {
 				return pushPCMErr
 			}
 			return ctx.Err()

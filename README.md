@@ -386,8 +386,10 @@ transported. See [config.example.mk](config.example.mk) for build and tool overr
   call, say "Алиса", or run `make stop` to stop that stream.
 - **Brief connection loss.** The existing WebRTC connection can recover from `disconnected`. A final
   failure or closed control channel ends the call. There is no automatic new call.
-- **Completion tone.** Only a decoded ChatGPT hangup produces the low tone. A transport failure ends
-  the call without that tone. Say "Яндекс" again when ready for a new call.
+- **Call setup failure.** After "Яндекс", two short tones mean setup failed before the high-tone
+  player launched. Alice takes priority. Run `make logs` for setup and playback errors.
+- **Completion tone.** Only a decoded ChatGPT hangup can produce the low tone. Say "Яндекс" again
+  when ready for a new call.
 - **Process recovery.** A supervisor can restart a failed client twice, waiting five seconds before
   each attempt. Each replacement waits for "Яндекс". A normal hangup or rejected web session does
   not trigger a new call. A missing, invalid, or pre-sign-in saved session stops recovery; run
@@ -429,19 +431,22 @@ message alone does not prove capture works.
 </details>
 
 <details>
-<summary>Sign-in fails, or the service returns 401, 403, 400, or 422</summary>
+<summary>Sign-in or Voice setup fails</summary>
 
-| Error                                                       | Next action                                                                                  |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `Install the client first` or `cannot use browser sign-in`  | Run `make install`, then `make login` again.                                                 |
-| `Cannot start Chrome` or `CHROME must be the full path`     | Install Google Chrome, or set `CHROME` as described in [sign in](#4-sign-in-to-chatgpt).     |
-| `No ChatGPT sign-in found yet`                              | Finish signing in until your chats appear in that window, then press Enter again.            |
-| Google says the browser or app may not be secure            | Try another sign-in method that ChatGPT offers in that window.                               |
-| `edge challenged session renewal` or `HTTPS request failed` | The Station itself cannot reach ChatGPT's sign-in service. Check its network route (step 1). |
-| `session renewal timed out`                                 | The Station's network was slow. Say "Яндекс" again, and check the network if it repeats.     |
-| `run make login`, `ended the saved web session`, or `401`   | Run `make login`. A running client uses the new session from its next call.                  |
-| `403` during a call, or connection setup failure            | Check browser Voice access and the Station's network. This need not mean expiry.             |
-| `400`, `422`, or session error                              | Restore the voice settings to defaults, restart, and check service compatibility.            |
+| Error                                                                       | Next action                                                                              |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `Install the client first` or `cannot use browser sign-in`                  | Run `make install`, then `make login` again.                                             |
+| `Cannot start Chrome` or `CHROME must be the full path`                     | Install Google Chrome, or set `CHROME` as described in [sign in](#4-sign-in-to-chatgpt). |
+| `No ChatGPT sign-in found yet`                                              | Finish signing in until your chats appear in that window, then press Enter again.        |
+| Google says the browser or app may not be secure                            | Try another sign-in method that ChatGPT offers in that window.                           |
+| `edge challenged session renewal` or `session renewal HTTPS request failed` | Check the [Station's network route](#1-check-the-station-and-chatgpt).                   |
+| `session renewal timed out`                                                 | Wait for any `make login` to finish. Retry and check the network if the timeout repeats. |
+| `run make login`                                                            | Run `make login`. A running client uses the new session from its next call.              |
+| `received a Cloudflare challenge`                                           | Check the [Station's network route](#1-check-the-station-and-chatgpt).                   |
+| `voice signaling returned HTTP 403`                                         | Try browser Voice with the same account and network route as the Station.                |
+| `voice signaling HTTPS request failed`                                      | Check the [Station's network route](#1-check-the-station-and-chatgpt).                   |
+| `voice connection setup timed out`                                          | Check the [network](#1-check-the-station-and-chatgpt). Run `make logs` for audio errors. |
+| `voice signaling returned HTTP` 400 or 422, or `voice session error`        | Restore the voice settings to defaults, restart, and check service compatibility.        |
 
 `make login` shows the Station's error after `Station command failed (1).` Rejected sessions log a
 status or fixed error without the rejected value, cookies, or response body. Detection rearms for a

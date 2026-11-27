@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -167,7 +168,7 @@ func TestNativePrioritySurvivesMaskedSetupError(t *testing.T) {
 	}
 }
 
-func TestStationRearmsAfterCallFailureAndWaitsForAlice(t *testing.T) {
+func TestStationRearmsAfterInterruptedReadyCue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	client, server := net.Pipe()
@@ -175,6 +176,7 @@ func TestStationRearmsAfterCallFailureAndWaitsForAlice(t *testing.T) {
 	attempts := make(chan *stationEpoch, 3)
 	done := make(chan error, 1)
 	returned := make(chan struct{})
+	failure := errors.New("transport failed during the ready cue")
 	var output bytes.Buffer
 	go func() {
 		defer close(returned)
@@ -183,12 +185,13 @@ func TestStationRearmsAfterCallFailureAndWaitsForAlice(t *testing.T) {
 			count++
 			attempts <- e
 			if count == 1 {
-				return voiceCallError{errors.New("signaling HTTP 503")}
+				e.readyPlayerStarted = true
+				return voiceCallError{failure}
 			}
 			<-e.ctx.Done()
 			return context.Cause(e.ctx)
-		}, func(context.Context) error {
-			t.Error("failed or canceled attempt produced a completion cue")
+		}, func(context.Context, cueFrequency) error {
+			t.Error("interrupted ready cue produced a second cue")
 			return nil
 		})
 	}()
@@ -236,14 +239,14 @@ func TestStationRearmsAfterCallFailureAndWaitsForAlice(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatal("station did not stop on cancellation", err)
 	}
-	if !bytes.Contains(output.Bytes(), []byte("signaling HTTP 503")) {
+	if !strings.Contains(output.String(), failure.Error()) {
 		t.Fatal("failed call was not reported")
 	}
 }
 
 func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 	for _, cancellation := range []string{"none", "Alice", "parent", "joined Alice", "joined parent"} {
-		for _, status := range []int{400, 422, 200} {
+		for _, status := range []int{400, 403, 422, 200} {
 			t.Run(fmt.Sprintf("%d/%s", status, cancellation), func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
@@ -289,6 +292,7 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 				wake := make(chan struct{}, 1)
 				rejected := make(chan struct{})
 				done := make(chan error, 1)
+				var cues []cueFrequency
 				var output bytes.Buffer
 				go func() {
 					done <- serveStation(ctx, client, &output, func(e *stationEpoch, gate *stationGate) error {
@@ -300,6 +304,7 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 						}
 						_, err := exchangeOffer(e.ctx, httpClient, credential{AccessToken: "synthetic-token", DeviceID: "offline-device"}, "v=0\r\n", []byte(`{}`))
 						if err == nil {
+							e.readyPlayerStarted = true
 							err = controlFailure
 						}
 						if strings.Contains(cancellation, "Alice") {
@@ -316,8 +321,8 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 						}
 						close(rejected)
 						return voiceCallError{err}
-					}, func(context.Context) error {
-						t.Error("rejected session produced a completion cue")
+					}, func(_ context.Context, cue cueFrequency) error {
+						cues = append(cues, cue)
 						return nil
 					})
 				}()
@@ -360,6 +365,10 @@ func TestStationRearmsAfterSessionRejectionWithoutRetry(t *testing.T) {
 				if err := <-done; err != context.Canceled {
 					t.Fatal("successful cleanup did not preserve bare cancellation", err)
 				}
+				wantCue := cancellation == "none" && status != 200
+				if wantCue && (len(cues) != 1 || cues[0] != failureCueFrequency) || !wantCue && len(cues) != 0 {
+					t.Fatal("rejected session produced unexpected cues", cues)
+				}
 				if !bytes.Contains(output.Bytes(), []byte("Voice attempt failed")) ||
 					bytes.Contains(output.Bytes(), []byte("private")) ||
 					bytes.Contains(output.Bytes(), []byte("ended normally")) {
@@ -385,7 +394,7 @@ func TestStationExpectedCancellationIsQuiet(t *testing.T) {
 					armed <- e
 					<-e.ctx.Done()
 					return runCall(e, filepath.Join(t.TempDir(), "session.json"), newStationCapture(e), sessionSettings{})
-				}, func(context.Context) error {
+				}, func(context.Context, cueFrequency) error {
 					t.Error("canceled attempt produced a completion cue")
 					return nil
 				})
@@ -453,7 +462,7 @@ func TestStationCleanupSurvivesAliceAndParentCancellation(t *testing.T) {
 							gate.observe(nativeEvent{activation: true})
 						}
 						return errors.Join(context.Cause(e.ctx), cleanup)
-					}, func(context.Context) error {
+					}, func(context.Context, cueFrequency) error {
 						t.Error("cleanup failure produced completion cue")
 						return nil
 					})
@@ -497,7 +506,7 @@ func TestCompletionCueDiagnostic(t *testing.T) {
 					}
 					cancel()
 					return context.Cause(e.ctx)
-				}, func(context.Context) error {
+				}, func(context.Context, cueFrequency) error {
 					if cueErr == context.Canceled {
 						cancel()
 					}
@@ -510,10 +519,40 @@ func TestCompletionCueDiagnostic(t *testing.T) {
 			if err := <-done; err != context.Canceled {
 				t.Fatal("cue failure made service fatal", err)
 			}
-			logged := strings.Contains(output.String(), "Completion cue failed")
+			logged := strings.Contains(output.String(), "Voice cue failed")
 			wantLog := cueErr != errAlicePriority && cueErr != context.Canceled
 			if logged != wantLog || wantLog && !strings.Contains(output.String(), cueErr.Error()) {
 				t.Fatal("cue detail lost or expected cancellation reported", output.String())
+			}
+		})
+	}
+}
+
+func TestCompletionCueFailureSurvivesCancellation(t *testing.T) {
+	for _, source := range []string{"Alice", "station stop"} {
+		t.Run(source, func(t *testing.T) {
+			ctx, stop := context.WithCancel(t.Context())
+			defer stop()
+			gate := newStationGate()
+			gate.observe(nativeEvent{stateChanged: true, state: aliceIdle})
+			epoch := gate.begin(ctx)
+			var output bytes.Buffer
+			epoch.report = log.New(&output, "", 0)
+			playerErr := errors.New("cannot play voice cue: exit status 7")
+			var want error
+			if source == "station stop" {
+				want = context.Canceled
+			}
+			err := finishStationAttempt(ctx, gate, epoch, nil, func(context.Context, cueFrequency) error {
+				if source == "Alice" {
+					gate.observe(nativeEvent{activation: true})
+				} else {
+					stop()
+				}
+				return playerErr
+			})
+			if !errors.Is(err, want) || !strings.Contains(output.String(), "Voice cue failed: "+playerErr.Error()) {
+				t.Fatal("cancellation hid a recoverable player failure", err, output.String())
 			}
 		})
 	}
@@ -525,11 +564,16 @@ func TestStationNativeAudioFaultIsTerminal(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()
 	done := make(chan error, 1)
+	failure := errors.New("signaling failed while the capture reader was stopping")
+	playbackFault := fmt.Errorf("%w: playback device stopped", errStationAudio)
 	go func() {
-		done <- serveStation(ctx, client, io.Discard, func(*stationEpoch, *stationGate) error {
-			return voiceCallError{fmt.Errorf("%w: capture stalled", errStationAudio)}
-		}, func(context.Context) error {
-			t.Error("native audio failure produced a completion cue")
+		done <- serveStation(ctx, client, io.Discard, func(e *stationEpoch, _ *stationGate) error {
+			e.revoke(errAlicePriority)
+			e.revoke(errCaptureOverflow)
+			e.revoke(playbackFault)
+			return voiceCallError{failure}
+		}, func(context.Context, cueFrequency) error {
+			t.Error("native audio failure produced a cue")
 			return nil
 		})
 	}()
@@ -538,8 +582,10 @@ func TestStationNativeAudioFaultIsTerminal(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if !errors.Is(err, errStationAudio) {
-			t.Fatal("native fault lost its cause", err)
+		for _, want := range []error{errAlicePriority, errCaptureOverflow, playbackFault, failure} {
+			if !errors.Is(err, want) {
+				t.Fatalf("terminal result lost %v: %v", want, err)
+			}
 		}
 	case <-ctx.Done():
 		t.Fatal("native audio fault was retried")
@@ -576,7 +622,7 @@ func TestStationAliceTakeoverCleanupFaultIsTerminal(t *testing.T) {
 			got.cause = context.Cause(e.ctx)
 			gate.observe(nativeEvent{stateChanged: true, state: aliceIdle})
 			return errors.Join(context.Canceled, cleanupErr)
-		}, func(context.Context) error {
+		}, func(context.Context, cueFrequency) error {
 			got.cues++
 			return nil
 		})
@@ -629,7 +675,7 @@ func TestCompletionEpochHandoff(t *testing.T) {
 			case "parent canceled":
 				cancel()
 			}
-			cue := g.completion(ctx, old)
+			cue := g.beginCue(ctx, old)
 			if action != "protocol hangup" {
 				if cue != nil {
 					_ = g.finish(cue, nil)
@@ -643,7 +689,7 @@ func TestCompletionEpochHandoff(t *testing.T) {
 			defer g.finish(cue, nil)
 			_ = g.finish(old, nil)
 			if !cue.allowed() || cue.number == old.number || old.allowed() || g.activate(old) == nil ||
-				g.completion(ctx, old) != nil {
+				g.beginCue(ctx, old) != nil {
 				t.Fatal("completion did not transfer ownership exclusively")
 			}
 			g.observe(nativeEvent{activation: true})
@@ -651,11 +697,36 @@ func TestCompletionEpochHandoff(t *testing.T) {
 			if cue.allowed() || !errors.Is(context.Cause(cue.ctx), errAlicePriority) || g.begin(ctx) != nil {
 				t.Fatal("Alice did not revoke completion until its cleanup")
 			}
+			g.observe(nativeEvent{stateChanged: true, state: aliceListening})
+			_ = g.finish(cue, nil)
+			if g.begin(ctx) != nil {
+				t.Fatal("station rearmed after cue cleanup while Alice was listening")
+			}
 		})
 	}
 }
 
-func TestStationCompletionYieldsToAliceAndRearms(t *testing.T) {
+func TestStationCuesYieldToAliceAndRearm(t *testing.T) {
+	t.Run("normal completion", func(t *testing.T) {
+		testStationCueYieldsToAliceAndRearms(t, endCueFrequency, func(e *stationEpoch) error {
+			e.revoke(errProtocolHangup)
+			return nil
+		})
+	})
+	t.Run("setup failure", func(t *testing.T) {
+		sessionFile := filepath.Join(t.TempDir(), "session.json")
+		testStationCueYieldsToAliceAndRearms(t, failureCueFrequency, func(e *stationEpoch) error {
+			return runCall(e, sessionFile, newStationCapture(e), sessionSettings{})
+		})
+	})
+}
+
+func testStationCueYieldsToAliceAndRearms(
+	t *testing.T,
+	wantCue cueFrequency,
+	firstAttempt func(*stationEpoch) error,
+) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	client, server := net.Pipe()
 	attempts := make(chan *stationEpoch, 2)
@@ -669,12 +740,14 @@ func TestStationCompletionYieldsToAliceAndRearms(t *testing.T) {
 			count++
 			attempts <- e
 			if count == 1 {
-				e.revoke(errProtocolHangup)
-				return nil
+				return firstAttempt(e)
 			}
 			<-e.ctx.Done()
 			return context.Cause(e.ctx)
-		}, func(cue context.Context) error {
+		}, func(cue context.Context, frequency cueFrequency) error {
+			if frequency != wantCue {
+				t.Errorf("played %v Hz instead of %v Hz", frequency, wantCue)
+			}
 			cues <- cue
 			<-cue.Done()
 			return context.Cause(cue)
@@ -703,24 +776,19 @@ func TestStationCompletionYieldsToAliceAndRearms(t *testing.T) {
 	select {
 	case cue = <-cues:
 	case <-ctx.Done():
-		t.Fatal("completed attempt did not produce a cue")
+		t.Fatal("attempt did not produce a cue")
 	}
 	if first.allowed() || cue.Err() != nil {
-		t.Fatal("completion reused the old media permission")
+		t.Fatal("cue reused the old media permission")
 	}
 	state(1)
 	select {
 	case <-cue.Done():
 		if !errors.Is(context.Cause(cue), errAlicePriority) {
-			t.Fatal("completion lost Alice priority")
+			t.Fatal("cue lost Alice priority")
 		}
 	case <-ctx.Done():
-		t.Fatal("Alice did not cancel completion")
-	}
-	select {
-	case <-attempts:
-		t.Fatal("station rearmed while Alice was listening")
-	default:
+		t.Fatal("Alice did not cancel the cue")
 	}
 	state(0)
 	if second := next(); !second.allowed() || second.number == first.number || cue.Err() == nil {
@@ -731,7 +799,7 @@ func TestStationCompletionYieldsToAliceAndRearms(t *testing.T) {
 		t.Fatal("station did not stop", err)
 	}
 	if len(cues) != 0 {
-		t.Fatal("one completed attempt produced multiple cues")
+		t.Fatal("one attempt produced multiple cues")
 	}
 }
 
@@ -825,8 +893,11 @@ func TestCapturePhasesDiscardWakeAndConnectingAudio(t *testing.T) {
 	for range captureQueueFrames {
 		push(captureSamples, 0)
 	}
-	if err := c.pushPCM(make([]byte, captureSamples*2)); !errors.Is(err, errCaptureOverflow) || e.allowed() {
-		t.Fatal("live capture overflow did not end attempt", err)
+	if err := c.pushPCM(make([]byte, captureSamples*2)); !errors.Is(err, errCaptureOverflow) {
+		t.Fatal("live capture overflow was not reported", err)
+	}
+	if cause := context.Cause(e.ctx); !errors.Is(cause, errCaptureOverflow) {
+		t.Fatal("live capture overflow did not revoke the attempt", cause)
 	}
 	for i := range captureQueueFrames {
 		nextFrame := <-c.input
@@ -860,7 +931,7 @@ func TestCaptureReadinessRejectsCancellation(t *testing.T) {
 			if err := c.beginStreaming(setupCtx); !errors.Is(err, want) {
 				t.Fatal("canceled readiness was accepted", err)
 			}
-			if err := c.pushPCM(make([]byte, captureSamples*2)); err != nil && !errors.Is(err, want) {
+			if err := c.pushPCM(make([]byte, captureSamples*2)); err != nil {
 				t.Fatal(err)
 			}
 			if len(c.input) != 0 {
@@ -883,7 +954,7 @@ func TestProcessedCaptureAssemblyAndCancellation(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()
 	done := make(chan error, 1)
-	go func() { done <- readCapture(e.ctx, client, capture) }()
+	go func() { done <- capture.read(client) }()
 	request, err := readIPC(server)
 	if err != nil || request.kind != 159 {
 		t.Fatal("audio subscription not sent", err)
@@ -919,7 +990,10 @@ func TestProcessedCaptureAssemblyAndCancellation(t *testing.T) {
 	}
 	e.revoke(errAlicePriority)
 	select {
-	case <-done:
+	case readErr := <-done:
+		if readErr != nil {
+			t.Fatal("local cancellation reported a capture fault", readErr)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("capture connection not closed on cancel")
 	}
@@ -941,6 +1015,73 @@ func TestProcessedCaptureAssemblyAndCancellation(t *testing.T) {
 		func([]byte) error { return nil },
 	); innerDecodeAudioErr == nil {
 		t.Fatal("wrong audio field wire type accepted")
+	}
+}
+
+type captureReadOnError struct {
+	net.Conn
+
+	started chan<- struct{}
+	onError func()
+}
+
+func (conn captureReadOnError) Read(p []byte) (int, error) {
+	conn.started <- struct{}{}
+	n, err := conn.Conn.Read(p)
+	if err != nil {
+		conn.onError()
+	}
+	return n, err
+}
+
+func TestCaptureReadFaultSurvivesCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	gate := newStationGate()
+	gate.observe(nativeEvent{stateChanged: true, state: aliceIdle})
+	epoch := gate.begin(ctx)
+	client, server := net.Pipe()
+	defer server.Close()
+	started := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- newStationCapture(epoch).read(captureReadOnError{
+			Conn:    client,
+			started: started,
+			onError: func() { epoch.revoke(context.Canceled) },
+		})
+	}()
+	if _, err := readIPC(server); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("capture reader did not request a frame")
+	}
+	_ = server.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, io.EOF) || !errors.Is(err, errStationAudio) ||
+			!errors.Is(context.Cause(epoch.ctx), context.Canceled) {
+			t.Fatal("capture fault or racing cancellation was lost", err, context.Cause(epoch.ctx))
+		}
+	case <-ctx.Done():
+		t.Fatal("capture reader did not finish")
+	}
+	attemptErr := errors.New("signaling failed during capture teardown")
+	result := finishStationAttempt(
+		ctx,
+		gate,
+		epoch,
+		voiceCallError{attemptErr},
+		func(context.Context, cueFrequency) error {
+			t.Error("fatal capture fault produced a cue")
+			return nil
+		},
+	)
+	if !errors.Is(result, attemptErr) || !errors.Is(result, errStationAudio) || !errors.Is(result, io.EOF) {
+		t.Fatal("station result lost the call error or capture fault", result)
 	}
 }
 
@@ -1006,13 +1147,13 @@ func TestMalformedStateRevokesAndCaptureStallEnds(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()
 	done := make(chan error, 1)
-	go func() { done <- readCapture(e.ctx, client, newStationCapture(e)) }()
+	go func() { done <- newStationCapture(e).read(client) }()
 	if _, err := readIPC(server); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case err := <-done:
-		if err == nil {
+		if !errors.Is(err, errStationAudio) {
 			t.Fatal("stalled capture ended without an error")
 		}
 	case <-time.After(audioStallTimeout + time.Second):
