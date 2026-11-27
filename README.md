@@ -7,7 +7,12 @@ Station and connects directly to ChatGPT. Once it is running, the computer can d
 
 - **Wake words.** Say "Яндекс" for ChatGPT. "Алиса" still starts the original assistant.
 - **Account.** Uses your ChatGPT account's Voice access and limits. No OpenAI API key is needed.
-- **Hardware.** Tested only on Station Mini 2. It needs root access and the original Alice services.
+- **Hardware.** Tested only on Station Mini 2 (`YNDX-00020`) with firmware
+  `0.369.1.46.4778262943.20261013.299`. The client needs root ADB and the original Alice services.
+
+**Need root ADB?** See [Yandex Station root](https://github.com/hu553in/yandex-station-root) for the
+tested Mini 2 setup. For another model or firmware, start with the
+[HackAlice device catalog](https://hackalice.me/devices/).
 
 [Before you start](#1-check-the-station-and-chatgpt) · [Computer setup](#2-prepare-the-computer) ·
 [Install](#3-connect-and-install) · [Sign in](#4-sign-in-to-chatgpt) ·
@@ -22,9 +27,8 @@ Complete these checks before building anything:
    Start a voice conversation and check that it hears you and answers aloud. Stop that conversation.
    If Voice does not work there, resolve that first. See
    [OpenAI's Voice guide](https://help.openai.com/en/articles/20001274-chatgpt-voice).
-2. If you have not finished [yandex-station-root](https://github.com/hu553in/yandex-station-root),
-   do that first. The client needs **root ADB on port 5555** and the original Alice services. The
-   status check in step 3 verifies access before installation.
+2. Confirm that your Station has **root ADB on port 5555** and that the original Alice services
+   still work. The status check in step 3 verifies ADB access and checks for required runtime files.
 3. In the Station's settings in the **Дом с Алисой** phone app, select **Алиса** as its wake word.
    This leaves **Яндекс** available to start ChatGPT.
 4. Check the network. The computer must reach the Station on the home network, and the **Station
@@ -397,15 +401,24 @@ transported. See [config.example.mk](config.example.mk) for build and tool overr
 
 ## Troubleshooting
 
-Run `make status` and `make logs` first. Logs can contain conversation diagnostics. Review them
-before sharing, and never share a session file, sign-in cookies, or a token.
+If you tried `yandex-station-root`, share the result in
+[Root compatibility reports](https://github.com/hu553in/yandex-station-root/issues/10).
+
+For a Voice problem, run `make status`. If root ADB works, open a
+[Voice issue](https://github.com/hu553in/yandex-station-chatgpt-voice/issues/new). Include the model
+code, full firmware version, relevant status lines such as `Runtime missing`, and the commit you
+built from if known.
+
+If a client log is available, include relevant lines from `make logs`. Review them first because
+they can contain conversation diagnostics. Keep your session file, sign-in cookies, and token
+private.
 
 <details>
 <summary>ADB cannot connect, or ADB command failed</summary>
 
 Check the Station's current IP in the router and update `STATION_IP` if needed. Confirm root ADB is
-enabled, the computer is on the same LAN, and the VPN permits local access. Run `make connect`. The
-[root guide](https://github.com/hu553in/yandex-station-root) covers enabling ADB. For
+enabled, the computer is on the same LAN, and the VPN permits local access. Run `make connect`. For
+help getting root ADB, see the [root setup links above](#chatgpt-voice-for-yandex-station). For
 `remote state may be unknown`, run `make status` and inspect any mutation lock before retrying an
 operation that might have changed the Station.
 
@@ -582,6 +595,10 @@ the Station's saved session. Running `make` without a target lists commands and 
 Station.
 
 ## Credits
+
+Thanks to the [Yandex Station Extended community (HackAlice)](https://hackalice.me/) for its device
+guides and firmware research. The companion root guide builds on
+[iwakura's eQuasar](https://git.gay/iwakura/eQuasar).
 
 The protocol work uses [chatgpt-web-voice](https://github.com/dyhhhhhh/chatgpt-web-voice) as a
 reference. Terminal event handling also uses
